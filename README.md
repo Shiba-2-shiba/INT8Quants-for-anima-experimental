@@ -38,10 +38,11 @@ required.
 Load Diffusion Model -> Anima INT8 ConvRot Save
 ```
 
-The checkpoint is written below
-`models/diffusion_models/comfy_quants/` and can be reloaded with the stock
-`Load Diffusion Model` node after refreshing the model list. A generic API
-workflow is available at
+The checkpoint and JSON report are written together below ComfyUI's configured
+`output/diffusion_models/` directory. This directory is registered as a
+`diffusion_models` search path when the custom node loads, so the checkpoint
+can be reloaded with the stock `Load Diffusion Model` node after refreshing the
+model list. A generic API workflow is available at
 [`examples/workflows/anima_int8_convrot.json`](examples/workflows/anima_int8_convrot.json).
 
 The node returns:

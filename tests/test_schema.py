@@ -39,10 +39,19 @@ def test_v3_schema_and_registration():
     extension = asyncio.run(package.comfy_entrypoint())
     nodes = asyncio.run(extension.get_node_list())
     assert len(nodes) == 1
+    node_module = sys.modules[nodes[0].__module__]
+    output_models_root = str(
+        (Path(node_module.folder_paths.get_output_directory()) / "diffusion_models").resolve(
+            strict=False
+        )
+    )
+    assert output_models_root in node_module.folder_paths.get_folder_paths("diffusion_models")
     schema = nodes[0].define_schema()
     assert schema.node_id == "ComfyQuantsAnimaInt8ConvRotSave"
     assert schema.is_output_node is True
     assert schema.not_idempotent is True
+    filename_prefix = next(item for item in schema.inputs if item.id == "filename_prefix")
+    assert "output/diffusion_models" in filename_prefix.tooltip
     preset = next(item for item in schema.inputs if item.id == "quantization_preset")
     assert preset.options == ["quality_keep", "public_examples"]
     assert preset.default == "quality_keep"
@@ -87,14 +96,24 @@ def test_execute_reports_progress_and_returns_stable_summary(tmp_path, monkeypat
         def update_absolute(self, current, total):
             progress_updates.append(("update", current, total))
 
-    output_paths = node_module.resolve_output_paths(
-        [tmp_path / "diffusion_models"], "anima"
-    )
+    output_directory = tmp_path / "output"
+    output_root = output_directory / "diffusion_models"
+    output_paths = node_module.resolve_output_paths(output_root, "anima")
+    registered_paths = []
     monkeypatch.setattr(node_module, "ProgressBar", FakeProgressBar)
+    monkeypatch.setattr(
+        node_module.folder_paths,
+        "get_output_directory",
+        lambda: str(output_directory),
+    )
+    monkeypatch.setattr(
+        node_module.folder_paths,
+        "add_model_folder_path",
+        lambda category, path: registered_paths.append((category, path)),
+    )
     monkeypatch.setattr(node_module, "extract_anima_state_dict", lambda _model: {"x": object()})
     monkeypatch.setattr(node_module, "estimate_state_dict_bytes", lambda _state: 123)
     monkeypatch.setattr(node_module, "expected_quantized_tensors", lambda _preset: 2)
-    monkeypatch.setattr(node_module, "resolve_output_paths", lambda _roots, _prefix: output_paths)
 
     def fake_export(**kwargs):
         kwargs["progress"](
@@ -145,3 +164,4 @@ def test_execute_reports_progress_and_returns_stable_summary(tmp_path, monkeypat
     }
     assert progress_updates[0][:2] == ("init", 2)
     assert progress_updates[-2:] == [("update", 1, 2), ("update", 2, 2)]
+    assert registered_paths == [("diffusion_models", str(output_root))]

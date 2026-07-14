@@ -25,7 +25,9 @@ package can be inspected without importing ComfyUI.
 `service.py` normalizes the ModelPatcher state dict to `net.*`, rejects patched
 or incompatible models, validates output paths and disk capacity, and owns the
 checkpoint/report publication transaction. It translates internal domain
-errors to actionable node errors.
+errors to actionable node errors. `nodes.py` resolves the configured ComfyUI
+output directory, stores both artifacts under `output/diffusion_models/`, and
+registers that directory as a stock diffusion-model search path.
 
 ## Quantization core
 

@@ -7,6 +7,7 @@
 | Model | Anima 2B diffusion model with 28 transformer blocks |
 | Source dtype | BF16 or FP16 in-memory weights |
 | Output | Stock ComfyUI `int8_tensorwise` safetensors |
+| Output directory | Configured ComfyUI `output/diffusion_models/` |
 | ConvRot | Regular Hadamard, group size 256 |
 | Presets | `quality_keep` (426), `public_examples` (448) |
 | Python | 3.10 or newer |

@@ -13,3 +13,5 @@ All notable changes are documented here. Versions follow semantic versioning.
   regression tests.
 - Add Registry metadata, GPL-3.0 provenance, portable installation guidance,
   and Windows/Linux CI.
+- Store generated checkpoints and reports together under the configured
+  `output/diffusion_models/` directory and register it for stock model loading.

@@ -23,6 +23,14 @@ from .service import (
 LOGGER = logging.getLogger(__name__)
 
 
+def _register_output_models_root() -> Path:
+    output_root = (
+        Path(folder_paths.get_output_directory()) / "diffusion_models"
+    ).resolve(strict=False)
+    folder_paths.add_model_folder_path("diffusion_models", str(output_root))
+    return output_root
+
+
 class ComfyQuantsAnimaInt8ConvRotSave(io.ComfyNode):
     @classmethod
     def define_schema(cls) -> io.Schema:
@@ -45,7 +53,7 @@ class ComfyQuantsAnimaInt8ConvRotSave(io.ComfyNode):
                 io.String.Input(
                     "filename_prefix",
                     default="anima_int8_convrot",
-                    tooltip="Path below models/diffusion_models/comfy_quants, without an extension.",
+                    tooltip="Path below output/diffusion_models, without an extension.",
                 ),
                 io.Combo.Input(
                     "device",
@@ -118,9 +126,8 @@ class ComfyQuantsAnimaInt8ConvRotSave(io.ComfyNode):
         hash_output: bool,
     ) -> io.NodeOutput:
         state_dict = extract_anima_state_dict(model)
-        canonical_root = Path(folder_paths.models_dir) / "diffusion_models"
-        registered_roots = folder_paths.get_folder_paths("diffusion_models")
-        paths = resolve_output_paths([canonical_root, *registered_roots], filename_prefix)
+        output_root = _register_output_models_root()
+        paths = resolve_output_paths(output_root, filename_prefix)
         source_bytes = estimate_state_dict_bytes(state_dict)
         LOGGER.info(
             "Starting Anima INT8 ConvRot export: tensors=%d, source_bytes=%d, device=%s, output=%s",
@@ -172,4 +179,5 @@ class ComfyQuantsExtension(ComfyExtension):
 
 
 async def comfy_entrypoint() -> ComfyQuantsExtension:
+    _register_output_models_root()
     return ComfyQuantsExtension()

@@ -158,17 +158,21 @@ def test_extract_rejects_non_anima_without_llm_adapter_signature():
         service.extract_anima_state_dict(FakeModel(state=state))
 
 
-def test_resolve_output_prefers_diffusion_models_and_strips_extension(tmp_path):
-    unet = tmp_path / "unet"
-    diffusion = tmp_path / "diffusion_models"
-    paths = service.resolve_output_paths([unet, diffusion], "variants/anima.safetensors")
-    assert paths.checkpoint == diffusion / "comfy_quants" / "variants" / "anima.safetensors"
+def test_resolve_output_uses_output_diffusion_models_root_and_strips_extension(tmp_path):
+    output_root = tmp_path / "output" / "diffusion_models"
+    paths = service.resolve_output_paths(output_root, "variants/anima.safetensors")
+    assert paths.checkpoint == output_root / "variants" / "anima.safetensors"
     assert paths.report.name == "anima.export_report.json"
 
 
 def test_resolve_output_preserves_dots_in_prefix(tmp_path):
-    paths = service.resolve_output_paths([tmp_path / "diffusion_models"], "anima.v1")
+    paths = service.resolve_output_paths(tmp_path / "output" / "diffusion_models", "anima.v1")
     assert paths.checkpoint.name == "anima.v1.safetensors"
+
+
+def test_resolve_output_rejects_non_diffusion_models_root(tmp_path):
+    with pytest.raises(service.QuantizationNodeError, match="output/diffusion_models"):
+        service.resolve_output_paths(tmp_path / "models" / "diffusion_models_old", "anima")
 
 
 @pytest.mark.parametrize(
@@ -177,11 +181,11 @@ def test_resolve_output_preserves_dots_in_prefix(tmp_path):
 )
 def test_resolve_output_rejects_unsafe_prefix(tmp_path, prefix):
     with pytest.raises(service.QuantizationNodeError):
-        service.resolve_output_paths([tmp_path / "diffusion_models"], prefix)
+        service.resolve_output_paths(tmp_path / "output" / "diffusion_models", prefix)
 
 
 def test_export_publishes_checkpoint_and_report_atomically(tmp_path):
-    paths = service.resolve_output_paths([tmp_path / "diffusion_models"], "anima")
+    paths = service.resolve_output_paths(tmp_path / "output" / "diffusion_models", "anima")
 
     def exporter(**kwargs):
         Path(kwargs["output_checkpoint"]).write_bytes(b"checkpoint")
@@ -222,7 +226,9 @@ def test_export_publishes_checkpoint_and_report_atomically(tmp_path):
 
 
 def test_export_supports_public_examples_448_preset(tmp_path):
-    paths = service.resolve_output_paths([tmp_path / "diffusion_models"], "anima-public")
+    paths = service.resolve_output_paths(
+        tmp_path / "output" / "diffusion_models", "anima-public"
+    )
 
     def exporter(**kwargs):
         Path(kwargs["output_checkpoint"]).write_bytes(b"checkpoint")
@@ -251,7 +257,7 @@ def test_export_supports_public_examples_448_preset(tmp_path):
 
 
 def test_export_rejects_unknown_quantization_preset(tmp_path):
-    paths = service.resolve_output_paths([tmp_path / "diffusion_models"], "invalid")
+    paths = service.resolve_output_paths(tmp_path / "output" / "diffusion_models", "invalid")
     with pytest.raises(service.QuantizationNodeError, match="Unsupported quantization_preset"):
         service.export_anima_int8_convrot(
             state_dict={},
@@ -266,7 +272,7 @@ def test_export_rejects_unknown_quantization_preset(tmp_path):
 
 
 def test_export_rejects_insufficient_free_disk_before_quantization(tmp_path, monkeypatch):
-    paths = service.resolve_output_paths([tmp_path / "diffusion_models"], "too-large")
+    paths = service.resolve_output_paths(tmp_path / "output" / "diffusion_models", "too-large")
     monkeypatch.setattr(
         service.shutil,
         "disk_usage",
@@ -286,7 +292,9 @@ def test_export_rejects_insufficient_free_disk_before_quantization(tmp_path, mon
 
 
 def test_export_wraps_output_directory_preflight_errors(tmp_path, monkeypatch):
-    paths = service.resolve_output_paths([tmp_path / "diffusion_models"], "unavailable")
+    paths = service.resolve_output_paths(
+        tmp_path / "output" / "diffusion_models", "unavailable"
+    )
 
     def fail_preflight(*_args):
         raise OSError("disk status unavailable")
@@ -309,7 +317,7 @@ def test_export_wraps_output_directory_preflight_errors(tmp_path, monkeypatch):
 
 
 def test_export_rejects_unexpected_quantized_count(tmp_path):
-    paths = service.resolve_output_paths([tmp_path / "diffusion_models"], "anima")
+    paths = service.resolve_output_paths(tmp_path / "output" / "diffusion_models", "anima")
 
     def exporter(**kwargs):
         Path(kwargs["output_checkpoint"]).write_bytes(b"partial")
@@ -330,7 +338,7 @@ def test_export_rejects_unexpected_quantized_count(tmp_path):
 
 
 def test_export_translates_internal_quantization_errors(tmp_path):
-    paths = service.resolve_output_paths([tmp_path / "diffusion_models"], "anima")
+    paths = service.resolve_output_paths(tmp_path / "output" / "diffusion_models", "anima")
 
     def exporter(**_kwargs):
         raise service.QuantizationExportError("invalid selected tensor")
@@ -381,7 +389,7 @@ def test_posix_publish_uses_atomic_hard_link(tmp_path, monkeypatch):
 
 
 def test_export_rolls_back_checkpoint_and_report_when_report_publish_fails(tmp_path, monkeypatch):
-    paths = service.resolve_output_paths([tmp_path / "diffusion_models"], "anima")
+    paths = service.resolve_output_paths(tmp_path / "output" / "diffusion_models", "anima")
     paths.checkpoint.parent.mkdir(parents=True)
     paths.checkpoint.write_bytes(b"old checkpoint")
     paths.report.write_text('{"old": true}\n', encoding="utf-8")
@@ -422,7 +430,9 @@ def test_export_rolls_back_checkpoint_and_report_when_report_publish_fails(tmp_p
 def test_export_does_not_replace_report_that_appears_during_no_overwrite_publish(
     tmp_path, monkeypatch
 ):
-    paths = service.resolve_output_paths([tmp_path / "diffusion_models"], "anima-race")
+    paths = service.resolve_output_paths(
+        tmp_path / "output" / "diffusion_models", "anima-race"
+    )
 
     def exporter(**kwargs):
         Path(kwargs["output_checkpoint"]).write_bytes(b"checkpoint")
@@ -456,7 +466,7 @@ def test_export_does_not_replace_report_that_appears_during_no_overwrite_publish
 
 
 def test_export_wraps_unexpected_exporter_errors_with_output_context(tmp_path):
-    paths = service.resolve_output_paths([tmp_path / "diffusion_models"], "failure")
+    paths = service.resolve_output_paths(tmp_path / "output" / "diffusion_models", "failure")
 
     def exporter(**_kwargs):
         raise OSError("simulated writer failure")
@@ -493,7 +503,7 @@ def test_service_wires_the_internal_exporter_through_publication(tmp_path, monke
         name: torch.randn(4, 256, dtype=torch.bfloat16),
         "net.final_layer.linear.bias": torch.randn(4),
     }
-    paths = service.resolve_output_paths([tmp_path / "diffusion_models"], "internal")
+    paths = service.resolve_output_paths(tmp_path / "output" / "diffusion_models", "internal")
 
     monkeypatch.setattr(
         export_module,

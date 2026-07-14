@@ -4,7 +4,7 @@ import json
 import os
 import shutil
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -148,16 +148,6 @@ def _ensure_output_capacity(output_directory: Path, state_dict: Mapping[str, Any
         )
 
 
-def select_diffusion_models_root(roots: Sequence[str | os.PathLike[str]]) -> Path:
-    candidates = [Path(root).expanduser() for root in roots]
-    if not candidates:
-        raise QuantizationNodeError("ComfyUI has no registered diffusion_models directory.")
-    return next(
-        (candidate for candidate in candidates if candidate.name.casefold() == "diffusion_models"),
-        candidates[0],
-    )
-
-
 def _validated_relative_prefix(filename_prefix: str) -> Path:
     value = str(filename_prefix).strip()
     if not value:
@@ -167,7 +157,9 @@ def _validated_relative_prefix(filename_prefix: str) -> Path:
         value = value[: -len(".safetensors")]
     relative = Path(value)
     if not value or relative.is_absolute() or relative.anchor or ".." in relative.parts:
-        raise QuantizationNodeError("filename_prefix must be a relative path inside the ComfyUI model directory.")
+        raise QuantizationNodeError(
+            "filename_prefix must be a relative path inside output/diffusion_models."
+        )
     if any(char in _INVALID_FILENAME_CHARS or ord(char) < 32 for char in value):
         raise QuantizationNodeError("filename_prefix contains characters that are invalid on Windows.")
     if any(part in ("", ".") for part in relative.parts):
@@ -181,10 +173,13 @@ def _validated_relative_prefix(filename_prefix: str) -> Path:
 
 
 def resolve_output_paths(
-    diffusion_model_roots: Sequence[str | os.PathLike[str]], filename_prefix: str
+    output_models_root: str | os.PathLike[str], filename_prefix: str
 ) -> OutputPaths:
-    model_root = select_diffusion_models_root(diffusion_model_roots).resolve(strict=False)
-    output_root = (model_root / "comfy_quants").resolve(strict=False)
+    output_root = Path(output_models_root).expanduser().resolve(strict=False)
+    if output_root.name.casefold() != "diffusion_models":
+        raise QuantizationNodeError(
+            "The output model root must be ComfyUI output/diffusion_models."
+        )
     relative = _validated_relative_prefix(filename_prefix)
     checkpoint_base = output_root / relative
     checkpoint = Path(f"{checkpoint_base}.safetensors").resolve(strict=False)
