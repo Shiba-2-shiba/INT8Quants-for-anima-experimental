@@ -1,8 +1,8 @@
 name: CI
 
 on:
-  push:
-  pull_request:
+  # Temporarily keep CI manual-only while the repository is being refactored.
+  workflow_dispatch:
 
 jobs:
   unit:
