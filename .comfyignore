@@ -1,0 +1,9 @@
+.agents/
+.github/
+.omx/
+docs/
+tests/
+tools/
+*.report.json
+*.export_report.json
+*.safetensors

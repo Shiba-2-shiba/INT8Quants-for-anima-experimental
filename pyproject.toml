@@ -1,0 +1,28 @@
+[project]
+name = "anima-int8-convrot"
+version = "0.1.0"
+description = "Self-contained Anima 2B INT8 ConvRot export node for ComfyUI"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+dependencies = ["safetensors>=0.4.0"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: Multimedia :: Graphics",
+]
+
+[project.urls]
+Repository = "https://github.com/Shiba-2-shiba/INT8Quants-for-anima-experimental"
+Documentation = "https://github.com/Shiba-2-shiba/INT8Quants-for-anima-experimental/tree/main/docs"
+"Bug Tracker" = "https://github.com/Shiba-2-shiba/INT8Quants-for-anima-experimental/issues"
+
+[tool.comfy]
+PublisherId = "Shiba-2-shiba"
+DisplayName = "Anima INT8 ConvRot"
+requires-comfyui = ">=0.27.0"
+
+[tool.pytest.ini_options]
+addopts = "--import-mode=importlib"
+testpaths = ["tests"]

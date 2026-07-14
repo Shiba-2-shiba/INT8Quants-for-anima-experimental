@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.10", "3.12"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install CPU test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -r requirements.txt pytest
+      - name: Run host-independent tests
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python -B -m pytest -q tests/test_service.py tests/test_quantization.py
+      - name: Validate Registry archive contents
+        run: python -B tools/validate_release_archive.py
+
+  comfyui-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Check out validated ComfyUI revision
+        run: |
+          git clone https://github.com/Comfy-Org/ComfyUI.git .ci/ComfyUI
+          git -C .ci/ComfyUI checkout 917faef771a2fd2f14f44af94f17da3d0b2803a3
+      - name: Install integration dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r .ci/ComfyUI/requirements.txt
+          python -m pip install -r requirements.txt pytest
+      - name: Validate Backend V3 registration
+        env:
+          PYTHONPATH: ${{ github.workspace }}/.ci/ComfyUI
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python -B -m pytest -q tests/test_schema.py
