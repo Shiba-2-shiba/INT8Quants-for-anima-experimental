@@ -9,7 +9,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .quantization import QuantizationExportError, export_anima_int8_convrot_from_state_dict
+from .quantization import (
+    QuantizationExportError,
+    export_anima_int8_convrot_from_state_dict,
+    export_krea2_int8_convrot_from_state_dict,
+)
 from .quantization.anima import (
     ANIMA_QUANTIZATION_PRESETS,
     DEFAULT_ANIMA_QUANTIZATION_PRESET,
@@ -17,10 +21,19 @@ from .quantization.anima import (
     expected_quantized_tensors as _expected_quantized_tensors,
     validate_anima_state_dict,
 )
+from .quantization.krea2 import (
+    KREA2_QUANTIZATION_PRESETS,
+    DEFAULT_KREA2_QUANTIZATION_PRESET,
+    Krea2ContractError,
+    expected_quantized_tensors as _expected_krea2_quantized_tensors,
+    validate_krea2_state_dict,
+)
 
 DIFFUSION_PREFIX = "diffusion_model."
 DEFAULT_QUANTIZATION_PRESET = DEFAULT_ANIMA_QUANTIZATION_PRESET
 QUANTIZATION_PRESETS = ANIMA_QUANTIZATION_PRESETS
+DEFAULT_KREA2_PRESET = DEFAULT_KREA2_QUANTIZATION_PRESET
+KREA2_PRESETS = KREA2_QUANTIZATION_PRESETS
 DISK_HEADROOM_BYTES = 64 * 1024 * 1024
 _INVALID_FILENAME_CHARS = frozenset('<>:"|?*')
 _WINDOWS_RESERVED_NAMES = frozenset(
@@ -44,6 +57,16 @@ def expected_quantized_tensors(quantization_preset: str) -> int:
         ) from exc
 
 
+def expected_krea2_quantized_tensors(quantization_preset: str) -> int:
+    try:
+        return _expected_krea2_quantized_tensors(quantization_preset)
+    except Krea2ContractError as exc:
+        supported = ", ".join(KREA2_PRESETS)
+        raise QuantizationNodeError(
+            f"Unsupported quantization_preset {quantization_preset!r}; expected one of: {supported}."
+        ) from exc
+
+
 @dataclass(frozen=True)
 class OutputPaths:
     checkpoint: Path
@@ -54,8 +77,12 @@ def _is_int8_tensor(tensor: Any) -> bool:
     return str(getattr(tensor, "dtype", "")) == "torch.int8"
 
 
-def extract_anima_state_dict(model: Any) -> dict[str, Any]:
-    """Extract the unpatched diffusion model state dict in the Anima ``net.*`` namespace."""
+def _extract_diffusion_state_dict(
+    model: Any,
+    *,
+    node_display_name: str,
+    normalize_key: Callable[[str], str],
+) -> dict[str, Any]:
     model_state_dict = getattr(model, "model_state_dict", None)
     if not callable(model_state_dict):
         raise QuantizationNodeError("The model input is not a ComfyUI ModelPatcher-compatible MODEL.")
@@ -72,7 +99,7 @@ def extract_anima_state_dict(model: Any) -> dict[str, Any]:
     ):
         if getattr(model, patch_field, None):
             raise QuantizationNodeError(
-                f"The input MODEL contains {patch_field}. Connect Anima INT8 ConvRot Save "
+                f"The input MODEL contains {patch_field}. Connect {node_display_name} "
                 "directly after Load Diffusion Model. Patched-model export is not supported."
             )
 
@@ -86,7 +113,7 @@ def extract_anima_state_dict(model: Any) -> dict[str, Any]:
         )
         if not allowed:
             raise QuantizationNodeError(
-                "The input MODEL contains model_options. Connect Anima INT8 ConvRot Save "
+                f"The input MODEL contains model_options. Connect {node_display_name} "
                 "directly after Load Diffusion Model. Patched-model export is not supported."
             )
 
@@ -101,12 +128,7 @@ def extract_anima_state_dict(model: Any) -> dict[str, Any]:
         if not isinstance(key, str) or not key.startswith(DIFFUSION_PREFIX):
             continue
         internal_key = key[len(DIFFUSION_PREFIX) :]
-        # ComfyUI strips the checkpoint's outer ``net.`` or
-        # ``model.diffusion_model.`` prefix before loading Anima. Its in-memory
-        # module therefore exposes ``diffusion_model.blocks.*``. The
-        # comfy-quants artifact contract uses the stock checkpoint namespace
-        # ``net.blocks.*``.
-        normalized_key = internal_key if internal_key.startswith("net.") else f"net.{internal_key}"
+        normalized_key = normalize_key(internal_key)
         if normalized_key in normalized:
             raise QuantizationNodeError(f"State dict key collision after prefix normalization: {normalized_key}")
         normalized[normalized_key] = tensor
@@ -117,13 +139,39 @@ def extract_anima_state_dict(model: Any) -> dict[str, Any]:
         key.endswith(".weight") and _is_int8_tensor(tensor) for key, tensor in normalized.items()
     ):
         raise QuantizationNodeError(
-            "The input MODEL is already quantized. Load the original floating-point Anima model instead."
+            "The input MODEL is already quantized. Load the original floating-point model instead."
         )
+    return normalized
+
+
+def extract_anima_state_dict(model: Any) -> dict[str, Any]:
+    """Extract the unpatched diffusion model state dict in the Anima ``net.*`` namespace."""
+
+    state_dict = _extract_diffusion_state_dict(
+        model,
+        node_display_name="Anima INT8 ConvRot Save",
+        normalize_key=lambda key: key if key.startswith("net.") else f"net.{key}",
+    )
     try:
-        validate_anima_state_dict(normalized, require_selected_tensors=False)
+        validate_anima_state_dict(state_dict, require_selected_tensors=False)
     except AnimaContractError as exc:
         raise QuantizationNodeError(str(exc)) from exc
-    return normalized
+    return state_dict
+
+
+def extract_krea2_state_dict(model: Any) -> dict[str, Any]:
+    """Extract an unpatched diffusion model state dict in Krea2's native namespace."""
+
+    state_dict = _extract_diffusion_state_dict(
+        model,
+        node_display_name="Krea2 INT8 ConvRot Save",
+        normalize_key=lambda key: key,
+    )
+    try:
+        validate_krea2_state_dict(state_dict, require_selected_tensors=False)
+    except Krea2ContractError as exc:
+        raise QuantizationNodeError(str(exc)) from exc
+    return state_dict
 
 
 def estimate_state_dict_bytes(state_dict: Mapping[str, Any]) -> int:
@@ -236,20 +284,24 @@ def _publish_without_overwrite(source: Path, destination: Path) -> None:
         raise
 
 
-def export_anima_int8_convrot(
+def _export_int8_convrot(
     *,
     state_dict: Mapping[str, Any],
     paths: OutputPaths,
+    family: str,
+    project: str,
+    model_display_name: str,
+    expected_count: int,
+    default_exporter: Callable[..., Any],
     device: str,
     overwrite: bool,
     write_report: bool,
     hash_output: bool,
-    quantization_preset: str = DEFAULT_QUANTIZATION_PRESET,
+    quantization_preset: str,
     progress: Callable[[dict[str, Any]], None] | None = None,
     exporter: Callable[..., Any] | None = None,
 ) -> tuple[dict[str, Any], str]:
-    """Export with the internal quantizer and publish the checkpoint atomically."""
-    expected_count = expected_quantized_tensors(quantization_preset)
+    """Export with a model-specific quantizer and publish both artifacts atomically."""
     if paths.checkpoint.exists() and not overwrite:
         raise QuantizationNodeError(
             f"Output checkpoint already exists and overwrite is disabled: {paths.checkpoint}"
@@ -273,13 +325,13 @@ def export_anima_int8_convrot(
     temporary_report: Path | None = None
     checkpoint_backup: Path | None = None
     report_backup: Path | None = None
-    export = exporter or export_anima_int8_convrot_from_state_dict
+    export = exporter or default_exporter
     try:
         try:
             report_object = export(
                 state_dict=state_dict,
                 output_checkpoint=temporary,
-                family="anima",
+                family=family,
                 convrot=True,
                 convrot_groupsize=256,
                 device=device,
@@ -289,13 +341,13 @@ def export_anima_int8_convrot(
                 require_all_rotated=True,
                 hash_output=hash_output,
                 metadata={
-                    "model_family": "anima",
-                    "project": "anima-int8-convrot",
+                    "model_family": family,
+                    "project": project,
                     "source": "comfyui_model_state_dict",
                 },
                 progress=progress,
             )
-        except (AnimaContractError, QuantizationExportError) as exc:
+        except (AnimaContractError, Krea2ContractError, QuantizationExportError) as exc:
             raise QuantizationNodeError(str(exc)) from exc
         report = _report_to_dict(report_object)
         quantized_count = int(report.get("quantized_tensor_count", -1))
@@ -361,10 +413,70 @@ def export_anima_int8_convrot(
         raise
     except Exception as exc:
         raise QuantizationNodeError(
-            "Anima INT8 export failed while writing or publishing "
+            f"{model_display_name} INT8 export failed while writing or publishing "
             f"{paths.checkpoint}: {exc}"
         ) from exc
     finally:
         temporary.unlink(missing_ok=True)
         if temporary_report is not None:
             temporary_report.unlink(missing_ok=True)
+
+
+def export_anima_int8_convrot(
+    *,
+    state_dict: Mapping[str, Any],
+    paths: OutputPaths,
+    device: str,
+    overwrite: bool,
+    write_report: bool,
+    hash_output: bool,
+    quantization_preset: str = DEFAULT_QUANTIZATION_PRESET,
+    progress: Callable[[dict[str, Any]], None] | None = None,
+    exporter: Callable[..., Any] | None = None,
+) -> tuple[dict[str, Any], str]:
+    return _export_int8_convrot(
+        state_dict=state_dict,
+        paths=paths,
+        family="anima",
+        project="anima-int8-convrot",
+        model_display_name="Anima",
+        expected_count=expected_quantized_tensors(quantization_preset),
+        default_exporter=export_anima_int8_convrot_from_state_dict,
+        device=device,
+        overwrite=overwrite,
+        write_report=write_report,
+        hash_output=hash_output,
+        quantization_preset=quantization_preset,
+        progress=progress,
+        exporter=exporter,
+    )
+
+
+def export_krea2_int8_convrot(
+    *,
+    state_dict: Mapping[str, Any],
+    paths: OutputPaths,
+    device: str,
+    overwrite: bool,
+    write_report: bool,
+    hash_output: bool,
+    quantization_preset: str = DEFAULT_KREA2_PRESET,
+    progress: Callable[[dict[str, Any]], None] | None = None,
+    exporter: Callable[..., Any] | None = None,
+) -> tuple[dict[str, Any], str]:
+    return _export_int8_convrot(
+        state_dict=state_dict,
+        paths=paths,
+        family="krea2",
+        project="krea2-int8-convrot",
+        model_display_name="Krea2",
+        expected_count=expected_krea2_quantized_tensors(quantization_preset),
+        default_exporter=export_krea2_int8_convrot_from_state_dict,
+        device=device,
+        overwrite=overwrite,
+        write_report=write_report,
+        hash_output=hash_output,
+        quantization_preset=quantization_preset,
+        progress=progress,
+        exporter=exporter,
+    )

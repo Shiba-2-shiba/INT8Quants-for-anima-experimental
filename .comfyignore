@@ -4,6 +4,7 @@
 docs/
 tests/
 tools/
+note_article_review_and_continuation.md
 *.report.json
 *.export_report.json
 *.safetensors

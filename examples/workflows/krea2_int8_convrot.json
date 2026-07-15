@@ -1,0 +1,30 @@
+{
+  "1": {
+    "inputs": {
+      "unet_name": "krea_2_raw.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "Load Krea2 Diffusion Model"
+    }
+  },
+  "2": {
+    "inputs": {
+      "filename_prefix": "krea2_int8_convrot",
+      "quantization_preset": "quality_keep",
+      "device": "cpu",
+      "overwrite": false,
+      "write_report": true,
+      "hash_output": false,
+      "model": [
+        "1",
+        0
+      ]
+    },
+    "class_type": "ComfyQuantsKrea2Int8ConvRotSave",
+    "_meta": {
+      "title": "Krea2 INT8 ConvRot Save"
+    }
+  }
+}

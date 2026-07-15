@@ -1,6 +1,6 @@
 # Contributing
 
-Keep changes focused on the self-contained Anima 2B INT8 export contract.
+Keep changes focused on the self-contained Anima 2B and Krea2 INT8 export contracts.
 
 1. Open an issue for behavior or compatibility changes.
 2. Add a failing regression test before changing quantization or publication

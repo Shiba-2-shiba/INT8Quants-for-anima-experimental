@@ -3,12 +3,16 @@
 
 from .export import (
     AnimaInt8ExportReport,
+    Int8ExportReport,
     QuantizationExportError,
     export_anima_int8_convrot_from_state_dict,
+    export_krea2_int8_convrot_from_state_dict,
 )
 
 __all__ = [
     "AnimaInt8ExportReport",
+    "Int8ExportReport",
     "QuantizationExportError",
     "export_anima_int8_convrot_from_state_dict",
+    "export_krea2_int8_convrot_from_state_dict",
 ]
