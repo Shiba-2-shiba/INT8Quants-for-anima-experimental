@@ -1,13 +1,13 @@
 # Copyright Comfy Quants Project contributors
 # SPDX-License-Identifier: GPL-3.0-only
-# Modified for this Anima-only custom node on 2026-07-14.
+# Modified for this custom node on 2026-07-15.
 #
 # Derived from Comfy-Org/comfy-quants at
 # 1e0d481f24847c4914578f5468917902ad53ea46, principally
 # comfy_quants/backends/int8_tensorwise_model_export.py and comfy_quants/api.py.
-# This version is intentionally limited to the in-memory Anima INT8 ConvRot path.
+# This version is limited to the in-memory Anima and Krea2 INT8 ConvRot paths.
 
-"""Write self-contained Anima INT8 ConvRot checkpoints for stock ComfyUI."""
+"""Write self-contained INT8 ConvRot checkpoints for stock ComfyUI."""
 
 from __future__ import annotations
 
@@ -20,10 +20,14 @@ from typing import Any
 
 from .anima import (
     DEFAULT_ANIMA_QUANTIZATION_PRESET,
-    AnimaTensorSpec,
     validate_anima_state_dict,
 )
+from .contracts import TensorSpec
 from .convrot import CONVROT_GROUP_SIZE, build_hadamard, is_power_of_four, rotate_weight
+from .krea2 import (
+    DEFAULT_KREA2_QUANTIZATION_PRESET,
+    validate_krea2_state_dict,
+)
 
 INT8_TENSORWISE_FORMAT_NAME = "int8_tensorwise"
 _ARTIFACT_CONTRACT = "int8_tensorwise_inference_checkpoint.v1"
@@ -35,7 +39,7 @@ class QuantizationExportError(RuntimeError):
 
 @dataclass
 class AnimaInt8ExportReport:
-    """Serializable summary of an in-memory Anima checkpoint export."""
+    """Serializable summary of an in-memory diffusion checkpoint export."""
 
     source_checkpoint: str
     output_checkpoint: str
@@ -83,11 +87,14 @@ class AnimaInt8ExportReport:
         return asdict(self)
 
 
+Int8ExportReport = AnimaInt8ExportReport
+
+
 def _require_torch():
     try:
         import torch
     except ImportError as exc:  # pragma: no cover - only reached without ComfyUI deps
-        raise QuantizationExportError("torch is required for Anima checkpoint export") from exc
+        raise QuantizationExportError("torch is required for INT8 checkpoint export") from exc
     return torch
 
 
@@ -95,7 +102,7 @@ def _require_safetensors_save_file():
     try:
         from safetensors.torch import save_file
     except ImportError as exc:  # pragma: no cover - only reached without declared deps
-        raise QuantizationExportError("safetensors is required for Anima checkpoint export") from exc
+        raise QuantizationExportError("safetensors is required for INT8 checkpoint export") from exc
     return save_file
 
 
@@ -216,9 +223,9 @@ def _validate_state_dict_values(state_dict: Mapping[str, Any]) -> None:
 
 
 def _validated_specs(
-    tensor_specs: Sequence[AnimaTensorSpec],
-) -> dict[str, AnimaTensorSpec]:
-    selected: dict[str, AnimaTensorSpec] = {}
+    tensor_specs: Sequence[TensorSpec],
+) -> dict[str, TensorSpec]:
+    selected: dict[str, TensorSpec] = {}
     for spec in tensor_specs:
         name = spec.name
         if name in selected:
@@ -235,7 +242,7 @@ def _validated_specs(
 def _validate_selected_tensor(
     name: str,
     tensor: Any,
-    spec: AnimaTensorSpec,
+    spec: TensorSpec,
     *,
     validate_source_dtype: bool,
 ) -> None:
@@ -283,7 +290,7 @@ def _write_int8_convrot_checkpoint_from_specs(
     *,
     state_dict: Mapping[str, Any],
     output_checkpoint: str | Path,
-    tensor_specs: Sequence[AnimaTensorSpec],
+    tensor_specs: Sequence[TensorSpec],
     convrot: bool = True,
     convrot_groupsize: int = CONVROT_GROUP_SIZE,
     device: str = "cpu",
@@ -294,8 +301,8 @@ def _write_int8_convrot_checkpoint_from_specs(
     metadata: Mapping[str, Any] | None = None,
     quantization_preset: str = DEFAULT_ANIMA_QUANTIZATION_PRESET,
     progress: Callable[[dict[str, Any]], None] | None = None,
-) -> AnimaInt8ExportReport:
-    """Internal writer separated from the fixed Anima selection for small tests."""
+) -> Int8ExportReport:
+    """Write one model contract without coupling the quantization math to its family."""
 
     save_file = _require_safetensors_save_file()
     torch = _require_torch()
@@ -479,7 +486,7 @@ def _write_int8_convrot_checkpoint_from_specs(
             "hash_state": output_hash_state,
         }
     ]
-    return AnimaInt8ExportReport(
+    return Int8ExportReport(
         source_checkpoint="<state_dict>",
         output_checkpoint=str(output_path),
         quantized_tensor_count=quantized,
@@ -507,42 +514,27 @@ def _write_int8_convrot_checkpoint_from_specs(
     )
 
 
-def export_anima_int8_convrot_from_state_dict(
+def _export_int8_convrot_from_state_dict(
     *,
     state_dict: Mapping[str, Any],
     output_checkpoint: str | Path,
-    family: str = "anima",
+    family: str,
+    validator: Callable[..., Sequence[TensorSpec]],
     convrot: bool = True,
     convrot_groupsize: int = CONVROT_GROUP_SIZE,
     device: str = "cpu",
     strict: bool = True,
     validate_source_dtype: bool = True,
-    quantization_preset: str = DEFAULT_ANIMA_QUANTIZATION_PRESET,
+    quantization_preset: str,
     require_all_rotated: bool = True,
     hash_output: bool = False,
     metadata: Mapping[str, Any] | None = None,
     progress: Callable[[dict[str, Any]], None] | None = None,
-) -> AnimaInt8ExportReport:
-    """Export an Anima 2B state dict as a stock-ComfyUI INT8 checkpoint.
-
-    Input keys use the normalized ``net.*`` namespace. Neither the input mapping
-    nor any of its tensors is modified.
-    """
-
-    if family != "anima":
-        detail = (
-            "Anima 14B is not supported"
-            if family == "anima_14b"
-            else "only family='anima' is supported"
-        )
-        raise QuantizationExportError(
-            f"unsupported INT8 state_dict family {family!r}: {detail}"
-        )
+) -> Int8ExportReport:
     if convrot_groupsize <= 0:
         raise QuantizationExportError("convrot_groupsize must be positive")
 
-    # anima.py is the single source of truth for signature, shapes, and presets.
-    tensor_specs = validate_anima_state_dict(
+    tensor_specs = validator(
         state_dict,
         preset=quantization_preset,
         require_selected_tensors=bool(strict),
@@ -567,4 +559,95 @@ def export_anima_int8_convrot_from_state_dict(
     )
 
 
-__all__ = ["AnimaInt8ExportReport", "export_anima_int8_convrot_from_state_dict"]
+def export_anima_int8_convrot_from_state_dict(
+    *,
+    state_dict: Mapping[str, Any],
+    output_checkpoint: str | Path,
+    family: str = "anima",
+    convrot: bool = True,
+    convrot_groupsize: int = CONVROT_GROUP_SIZE,
+    device: str = "cpu",
+    strict: bool = True,
+    validate_source_dtype: bool = True,
+    quantization_preset: str = DEFAULT_ANIMA_QUANTIZATION_PRESET,
+    require_all_rotated: bool = True,
+    hash_output: bool = False,
+    metadata: Mapping[str, Any] | None = None,
+    progress: Callable[[dict[str, Any]], None] | None = None,
+) -> Int8ExportReport:
+    """Export an Anima 2B state dict as a stock-ComfyUI INT8 checkpoint."""
+
+    if family != "anima":
+        detail = (
+            "Anima 14B is not supported"
+            if family == "anima_14b"
+            else "only family='anima' is supported"
+        )
+        raise QuantizationExportError(
+            f"unsupported INT8 state_dict family {family!r}: {detail}"
+        )
+    return _export_int8_convrot_from_state_dict(
+        state_dict=state_dict,
+        output_checkpoint=output_checkpoint,
+        family=family,
+        validator=validate_anima_state_dict,
+        convrot=convrot,
+        convrot_groupsize=convrot_groupsize,
+        device=device,
+        strict=strict,
+        validate_source_dtype=validate_source_dtype,
+        quantization_preset=quantization_preset,
+        require_all_rotated=require_all_rotated,
+        hash_output=hash_output,
+        metadata=metadata,
+        progress=progress,
+    )
+
+
+def export_krea2_int8_convrot_from_state_dict(
+    *,
+    state_dict: Mapping[str, Any],
+    output_checkpoint: str | Path,
+    family: str = "krea2",
+    convrot: bool = True,
+    convrot_groupsize: int = CONVROT_GROUP_SIZE,
+    device: str = "cpu",
+    strict: bool = True,
+    validate_source_dtype: bool = True,
+    quantization_preset: str = DEFAULT_KREA2_QUANTIZATION_PRESET,
+    require_all_rotated: bool = True,
+    hash_output: bool = False,
+    metadata: Mapping[str, Any] | None = None,
+    progress: Callable[[dict[str, Any]], None] | None = None,
+) -> Int8ExportReport:
+    """Export a native-namespace Krea2 state dict as a stock-ComfyUI INT8 checkpoint."""
+
+    if family != "krea2":
+        raise QuantizationExportError(
+            f"unsupported INT8 state_dict family {family!r}: only family='krea2' is supported"
+        )
+    return _export_int8_convrot_from_state_dict(
+        state_dict=state_dict,
+        output_checkpoint=output_checkpoint,
+        family=family,
+        validator=validate_krea2_state_dict,
+        convrot=convrot,
+        convrot_groupsize=convrot_groupsize,
+        device=device,
+        strict=strict,
+        validate_source_dtype=validate_source_dtype,
+        require_all_rotated=require_all_rotated,
+        hash_output=hash_output,
+        metadata=metadata,
+        quantization_preset=quantization_preset,
+        progress=progress,
+    )
+
+
+__all__ = [
+    "AnimaInt8ExportReport",
+    "Int8ExportReport",
+    "QuantizationExportError",
+    "export_anima_int8_convrot_from_state_dict",
+    "export_krea2_int8_convrot_from_state_dict",
+]

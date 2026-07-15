@@ -1,7 +1,7 @@
 # Architecture
 
-The repository is one self-contained ComfyUI custom node. Runtime code has
-three boundaries:
+The repository is one self-contained ComfyUI custom-node package with two
+model-specific output nodes and one shared INT8 writer.
 
 ```text
 ComfyUI Backend V3
@@ -11,33 +11,45 @@ ComfyUI Backend V3
                   service.py
                      |
                      v
-        quantization/{anima,convrot,export}.py
+  quantization/{contracts,anima,krea2,convrot,export}.py
 ```
 
 ## ComfyUI adapter
 
-`nodes.py` defines the V3 schema, obtains ComfyUI model directories, reports
-progress, and converts the result to `NodeOutput`. `__init__.py` is lazy so the
-package can be inspected without importing ComfyUI.
+`nodes.py` registers separate Anima and Krea2 schemas. A small immutable node
+profile shares the identical controls, progress handling, and summary shaping
+without merging the public node IDs or model-specific descriptions. Existing
+Anima workflows continue to reference `ComfyQuantsAnimaInt8ConvRotSave`.
+
+There is no custom frontend extension. Both nodes use only Backend V3 metadata,
+which survives the stock `/object_info` to Nodes 2.0 transformation.
 
 ## Application service
 
-`service.py` normalizes the ModelPatcher state dict to `net.*`, rejects patched
-or incompatible models, validates output paths and disk capacity, and owns the
-checkpoint/report publication transaction. It translates internal domain
-errors to actionable node errors. `nodes.py` resolves the configured ComfyUI
-output directory, stores both artifacts under `output/diffusion_models/`, and
-registers that directory as a stock diffusion-model search path.
+`service.py` owns ModelPatcher mutation checks, already-quantized rejection,
+disk capacity checks, output path validation, and the checkpoint/report
+publication transaction.
+
+The extraction boundary is deliberately model-specific:
+
+- Anima converts the in-memory `diffusion_model.*` keys to the checkpoint's
+  `net.*` namespace.
+- Krea2 strips only the in-memory `diffusion_model.` wrapper and retains the
+  native `first`, `blocks`, and `txtfusion` namespace expected by stock ComfyUI.
 
 ## Quantization core
 
-- `anima.py` is the single source of truth for the Anima 2B signature, 28-block
-  shapes, and the 426/448 preset selections.
-- `convrot.py` contains only regular-Hadamard generation and offline weight
-  rotation.
-- `export.py` validates selected tensors, performs per-row INT8 quantization,
-  writes the stock ComfyUI marker/scale tensors, and creates a safetensors
-  artifact report.
+- `contracts.py` contains the shared name/shape value object.
+- `anima.py` owns the Anima 2B signature, 28-block shapes, and 426/448 presets.
+- `krea2.py` owns the Krea2 signature, fixed open-weight architecture, and 224
+  block-linear selection.
+- `convrot.py` contains regular-Hadamard generation and offline weight rotation.
+- `export.py` validates selected tensors, performs rowwise INT8 quantization,
+  writes marker/scale tensors, and copies non-selected tensors unchanged.
 
-The core has no registry, CLI, graph/policy framework, submodule, or external
-`comfy_quants` import.
+Public Anima and Krea2 export functions are thin model-contract wrappers around
+the same `_write_int8_convrot_checkpoint_from_specs` implementation. The old
+`AnimaInt8ExportReport` name remains as an alias for compatibility.
+
+The core has no generic registry, CLI, graph/policy framework, submodule, or
+external quantization-package import.

@@ -1,6 +1,6 @@
 # Copyright Comfy Quants Project contributors
 # SPDX-License-Identifier: GPL-3.0-only
-# Modified for this Anima-only custom node on 2026-07-14.
+# Modified for this custom node on 2026-07-14 and 2026-07-15.
 """Offline regular-Hadamard ConvRot for Anima INT8 weight export.
 
 Derived from ``Comfy-Org/comfy-quants`` at commit

@@ -1,6 +1,6 @@
 # Copyright Comfy Quants Project contributors
 # SPDX-License-Identifier: GPL-3.0-only
-# Modified for this Anima-only custom node on 2026-07-14.
+# Modified for this custom node on 2026-07-14 and 2026-07-15.
 """Self-contained Anima 2B tensor contract for INT8 ConvRot export.
 
 Derived from ``Comfy-Org/comfy-quants`` at commit
@@ -18,17 +18,16 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Final
 
+from .contracts import TensorSpec
+
 
 class AnimaContractError(ValueError):
     """An Anima model or quantization preset violates the supported contract."""
 
 
 @dataclass(frozen=True, slots=True)
-class AnimaTensorSpec:
-    """Name and exact matrix shape of one quantized Anima weight."""
-
-    name: str
-    shape: tuple[int, int]
+class AnimaTensorSpec(TensorSpec):
+    """Backward-compatible Anima name for the shared tensor specification."""
 
 
 ANIMA_MODEL_CHANNELS: Final = 2048

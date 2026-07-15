@@ -38,7 +38,9 @@ python -B -m pytest -q
 2. Keep Anima names and shapes centralized in `quantization/anima.py`.
 3. Do not add runtime path manipulation or an external `comfy_quants`
    dependency.
-4. Verify both presets, marker bytes, input non-mutation, and transaction
-   rollback after quantization changes.
+4. Verify both Anima presets, the Krea2 224-weight contract, marker bytes,
+   input non-mutation, and transaction rollback after quantization changes.
 5. Record real-model export, stock reload, and inference evidence before a
    release.
+6. Keep model-specific namespace normalization and shape validation in the
+   matching `quantization/{anima,krea2}.py` module.

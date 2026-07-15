@@ -49,6 +49,17 @@ def anima_state_dict(channels=2048):
     return state
 
 
+def krea2_state_dict(features=6144, layers=28):
+    state = {
+        "diffusion_model.first.weight": FakeTensor((features, 64)),
+        "diffusion_model.txtfusion.projector.weight": FakeTensor((1, 12)),
+        "diffusion_model.txtfusion.layerwise_blocks.0.prenorm.scale": FakeTensor((2560,)),
+    }
+    for block in range(layers):
+        state[f"diffusion_model.blocks.{block}.attn.wq.weight"] = FakeTensor((features, features))
+    return state
+
+
 class FakeModel:
     def __init__(
         self,
@@ -158,6 +169,29 @@ def test_extract_rejects_non_anima_without_llm_adapter_signature():
         service.extract_anima_state_dict(FakeModel(state=state))
 
 
+def test_extract_krea2_strips_diffusion_prefix_without_adding_net():
+    model = FakeModel(state=krea2_state_dict())
+    result = service.extract_krea2_state_dict(model)
+
+    assert model.filter_prefix == "diffusion_model."
+    assert "first.weight" in result
+    assert "txtfusion.projector.weight" in result
+    assert all(not key.startswith(("diffusion_model.", "net.")) for key in result)
+
+
+def test_extract_krea2_rejects_wrong_width_and_missing_blocks():
+    with pytest.raises(service.QuantizationNodeError, match="6144|Krea2"):
+        service.extract_krea2_state_dict(FakeModel(state=krea2_state_dict(features=4096)))
+
+    with pytest.raises(service.QuantizationNodeError, match="block contract mismatch"):
+        service.extract_krea2_state_dict(FakeModel(state=krea2_state_dict(layers=27)))
+
+
+def test_extract_krea2_rejects_anima_model():
+    with pytest.raises(service.QuantizationNodeError, match="Krea2|txtfusion.projector"):
+        service.extract_krea2_state_dict(FakeModel(state=anima_state_dict()))
+
+
 def test_resolve_output_uses_output_diffusion_models_root_and_strips_extension(tmp_path):
     output_root = tmp_path / "output" / "diffusion_models"
     paths = service.resolve_output_paths(output_root, "variants/anima.safetensors")
@@ -254,6 +288,49 @@ def test_export_supports_public_examples_448_preset(tmp_path):
 
     assert report["quantized_tensor_count"] == 448
     assert paths.checkpoint.read_bytes() == b"checkpoint"
+
+
+def test_krea2_export_uses_shared_publication_with_krea2_metadata(tmp_path):
+    paths = service.resolve_output_paths(
+        tmp_path / "output" / "diffusion_models",
+        "krea2",
+    )
+    captured = {}
+
+    def exporter(**kwargs):
+        captured.update(kwargs)
+        Path(kwargs["output_checkpoint"]).write_bytes(b"krea2 checkpoint")
+        return {
+            "status": "model_written",
+            "quantized_tensor_count": 224,
+            "rotated_tensor_count": 224,
+            "written_files": [
+                {
+                    "path": str(kwargs["output_checkpoint"]),
+                    "kind": "int8_tensorwise_inference_checkpoint",
+                }
+            ],
+        }
+
+    report, report_path = service.export_krea2_int8_convrot(
+        state_dict={"first.weight": FakeTensor((6144, 64))},
+        paths=paths,
+        device="cpu",
+        overwrite=False,
+        write_report=True,
+        hash_output=False,
+        exporter=exporter,
+    )
+
+    assert paths.checkpoint.read_bytes() == b"krea2 checkpoint"
+    assert Path(report_path).is_file()
+    assert captured["family"] == "krea2"
+    assert captured["metadata"] == {
+        "model_family": "krea2",
+        "project": "krea2-int8-convrot",
+        "source": "comfyui_model_state_dict",
+    }
+    assert report["quantized_tensor_count"] == 224
 
 
 def test_export_rejects_unknown_quantization_preset(tmp_path):

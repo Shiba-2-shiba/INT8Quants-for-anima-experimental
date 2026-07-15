@@ -21,8 +21,10 @@ REQUIRED = {
     "pyproject.toml",
     "quantization/__init__.py",
     "quantization/anima.py",
+    "quantization/contracts.py",
     "quantization/convrot.py",
     "quantization/export.py",
+    "quantization/krea2.py",
     "requirements.txt",
     "service.py",
 }
@@ -107,7 +109,7 @@ def _validate_contents(candidates: list[tuple[Path, str]]) -> None:
 
 
 def _smoke_test(candidates: list[tuple[Path, str]]) -> None:
-    with tempfile.TemporaryDirectory(prefix="anima-int8-release-") as directory:
+    with tempfile.TemporaryDirectory(prefix="int8-convrot-release-") as directory:
         staging = Path(directory)
         for source, relative in candidates:
             destination = staging / relative
@@ -138,6 +140,7 @@ quantization = importlib.util.module_from_spec(quant_spec)
 sys.modules[quant_spec.name] = quantization
 quant_spec.loader.exec_module(quantization)
 assert callable(quantization.export_anima_int8_convrot_from_state_dict)
+assert callable(quantization.export_krea2_int8_convrot_from_state_dict)
 """
         subprocess.run(
             [sys.executable, "-B", "-c", check],
