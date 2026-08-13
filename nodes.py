@@ -262,6 +262,8 @@ def _execute_export(
         "estimated_peak_memory_bytes",
         "required_additional_memory_bytes",
         "available_memory_bytes_at_preflight",
+        "estimated_output_file_bytes",
+        "streaming_chunk_bytes",
     ):
         if memory_key in report:
             summary_data[memory_key] = report[memory_key]

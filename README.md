@@ -105,9 +105,11 @@ model signatures, missing blocks, invalid tensor shapes/dtypes, non-finite
 selected weights, unsafe output paths, and insufficient free disk space.
 Checkpoint/report publication uses temporary files and rollback.
 
-MiniMax H3 additionally performs a conservative available-RAM preflight. The
-provisional recommendation is 96 GB system RAM for the official BF16 layout
-and 160 GB for a fully FP32 source; see [`docs/minimax_h3.md`](docs/minimax_h3.md).
+MiniMax H3 additionally uses a bounded-memory streaming writer and performs an
+available-RAM preflight for its 32 MiB quantization chunks. Loading the source
+model remains the dominant cost; the provisional recommendations are 64 GB
+system RAM for the official BF16 layout and 96 GB for a fully FP32 source. See
+[`docs/minimax_h3.md`](docs/minimax_h3.md).
 
 `cuda` is also the PyTorch device name on ROCm builds. Successful offline
 export does not by itself guarantee that an optimized runtime INT8 kernel is

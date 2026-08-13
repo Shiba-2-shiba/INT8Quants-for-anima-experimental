@@ -496,7 +496,9 @@ def test_minimax_h3_export_uses_reference_preset_and_shared_publication(tmp_path
         }
 
     report, report_path = service.export_minimax_h3_int8_convrot(
-        state_dict={"video_patch_proj.weight": FakeTensor((5376, 96))},
+        state_dict={
+            "blocks.0.attn.qkv_proj.weight": FakeTensor((4, 256))
+        },
         paths=paths,
         device="cpu",
         overwrite=False,
@@ -565,19 +567,59 @@ def test_minimax_h3_memory_estimate_and_available_memory_boundary(monkeypatch):
     estimate = service.estimate_minimax_h3_memory(state)
 
     assert estimate.source_bytes == 2064
-    assert estimate.retained_output_bytes == 1128
-    assert estimate.workspace_bytes == 4096
-    assert estimate.estimated_peak_bytes == 8746
-    assert estimate.required_additional_bytes == 6269
+    assert estimate.output_file_bytes == 1128
+    assert estimate.workspace_bytes == 12288
+    assert estimate.estimated_peak_bytes == 16810
+    assert estimate.required_additional_bytes == 14746
 
-    monkeypatch.setattr(service, "_available_memory_bytes", lambda: 6268)
+    monkeypatch.setattr(service, "_available_memory_bytes", lambda: 14745)
     with pytest.raises(service.QuantizationNodeError, match="Insufficient.*memory"):
         service._preflight_minimax_h3_memory(state)
 
-    monkeypatch.setattr(service, "_available_memory_bytes", lambda: 6269)
+    monkeypatch.setattr(service, "_available_memory_bytes", lambda: 14746)
     checked, available = service._preflight_minimax_h3_memory(state)
     assert checked == estimate
-    assert available == 6269
+    assert available == 14746
+
+
+def test_minimax_h3_disk_preflight_uses_streaming_output_size(tmp_path, monkeypatch):
+    paths = service.resolve_output_paths(
+        tmp_path / "output" / "diffusion_models",
+        "minimax_h3_streaming_disk",
+    )
+    state = {
+        "blocks.0.attn.qkv_proj.weight": FakeTensor(
+            (4, 256), "torch.bfloat16", element_bytes=2
+        ),
+    }
+    available = 1024 + 16 + 72 + service.DISK_HEADROOM_BYTES
+    monkeypatch.setattr(
+        service.shutil,
+        "disk_usage",
+        lambda _path: types.SimpleNamespace(total=available, used=0, free=available),
+    )
+
+    def exporter(**kwargs):
+        Path(kwargs["output_checkpoint"]).write_bytes(b"checkpoint")
+        return {
+            "status": "model_written",
+            "quantized_tensor_count": 200,
+            "rotated_tensor_count": 200,
+            "copied_tensor_count": 332,
+            "written_files": [],
+        }
+
+    service.export_minimax_h3_int8_convrot(
+        state_dict=state,
+        paths=paths,
+        device="cpu",
+        overwrite=False,
+        write_report=False,
+        hash_output=False,
+        exporter=exporter,
+    )
+
+    assert paths.checkpoint.is_file()
 
 
 def test_minimax_h3_service_export_rejects_fp16_selected_tensor(
@@ -656,7 +698,7 @@ def test_export_wraps_output_directory_preflight_errors(tmp_path, monkeypatch):
         tmp_path / "output" / "diffusion_models", "unavailable"
     )
 
-    def fail_preflight(*_args):
+    def fail_preflight(*_args, **_kwargs):
         raise OSError("disk status unavailable")
 
     monkeypatch.setattr(service, "_ensure_output_capacity", fail_preflight)

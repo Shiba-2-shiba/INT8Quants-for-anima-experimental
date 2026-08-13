@@ -71,21 +71,20 @@ no data-offset gaps or overlaps. The selected INT8 weights occupy
 1,690,500,192 bytes.
 
 For the official mixed-precision/BF16 source layout, the floating-point state
-dict is about 40.23 GB (37.46 GiB). The writer estimates source storage,
-retained copied/INT8/scale/marker output, two maximum-matrix ConvRot workspace
-copies, and 20% headroom before export. That formula estimates about 74.18 GB
-(69.08 GiB) peak for the reference layout, so 96 GB system RAM remains the
-provisional recommendation. It also compares currently available physical RAM
-with the estimated additional allocation and fails before quantization when
-the latter does not fit. The estimate and preflight availability are recorded
-in the report and node summary.
+dict is about 40.23 GB (37.46 GiB). MiniMax H3 uses a dedicated streaming
+writer: selected matrices are processed in source chunks of at most 32 MiB,
+INT8 bytes are written immediately, and only the small FP32 row scales remain
+live until their adjacent output entry is written. Kept tensors are copied
+directly instead of being accumulated in a second in-memory state dict.
 
-ComfyUI can construct the supported architecture in FP32 as well. A fully FP32
-source contains about 80.45 GB (74.92 GiB) before output/workspace; use at
-least 160 GB system RAM until a measured lower requirement is established.
-This PC cannot safely run either full export; automated tests use
-shape-preserving small fixtures and stock ComfyUI detection without loading
-the real model.
+The RAM preflight therefore excludes the 20.97 GB output file from live memory.
+It budgets six 32 MiB work buffers plus 20% headroom, or about 230.4 MiB of
+additional RAM for the reference model. The estimated output size, streaming
+chunk size, peak memory, required additional memory, and preflight availability
+are recorded in the report and node summary. Loading the source model remains
+the dominant requirement; 64 GB system RAM for the BF16 layout and 96 GB for a
+fully FP32 source remain provisional recommendations until full-model peak RSS
+has been measured.
 
 Release validation still requires a high-memory machine to record peak RSS,
 export/reload success, fixed-input forward error, and a short fixed-seed sample.

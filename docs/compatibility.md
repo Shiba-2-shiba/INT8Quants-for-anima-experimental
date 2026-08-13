@@ -14,7 +14,7 @@
 | Anima presets | `quality_keep` (426), `public_examples` (448) |
 | Krea2 presets | `quality_keep` (224) |
 | MiniMax H3 presets | `strict_reference` (200) |
-| MiniMax H3 RAM | 96 GB recommended for the reference BF16 layout; 160 GB for a fully FP32 source (provisional) |
+| MiniMax H3 RAM | Streaming export adds about 230.4 MiB; 64 GB BF16 / 96 GB FP32 total system RAM recommended (provisional) |
 | Python | 3.10 or newer |
 | ComfyUI API | Backend V3 `v0_0_2` |
 | Minimum ComfyUI | 0.31.0 (MiniMax H3 plus corrected AV sampling settings) |
