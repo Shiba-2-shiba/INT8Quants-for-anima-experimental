@@ -32,9 +32,17 @@ from .minimax_h3 import (
     DEFAULT_MINIMAX_H3_QUANTIZATION_PRESET,
     validate_minimax_h3_state_dict,
 )
+from .safetensors_stream import (
+    SafetensorsStreamError,
+    build_layouts,
+    tensor_bytes_view,
+    write_all,
+    write_streaming_file,
+)
 
 INT8_TENSORWISE_FORMAT_NAME = "int8_tensorwise"
 _ARTIFACT_CONTRACT = "int8_tensorwise_inference_checkpoint.v1"
+DEFAULT_STREAMING_CHUNK_BYTES = 32 * 1024 * 1024
 
 
 class QuantizationExportError(RuntimeError):
@@ -207,6 +215,348 @@ def _quantize_int8_tensorwise_per_row(
     )
     quantized = (weight / scale_math).round_().clamp_(-128.0, 127.0).to(torch.int8)
     return quantized.contiguous(), scale.to(torch.float32).contiguous(), rotated
+
+
+def _streaming_row_count(
+    tensor: Any,
+    *,
+    chunk_bytes: int,
+) -> int:
+    if chunk_bytes <= 0:
+        raise QuantizationExportError("streaming_chunk_bytes must be positive")
+    row_bytes = int(tensor.shape[1]) * int(tensor.element_size())
+    return max(1, int(chunk_bytes) // max(1, row_bytes))
+
+
+def _write_tensor_bytes(handle: Any, tensor: Any) -> None:
+    write_all(handle, tensor_bytes_view(tensor))
+
+
+def _write_tensor_streaming(
+    handle: Any,
+    tensor: Any,
+    *,
+    chunk_bytes: int,
+) -> None:
+    """Write a kept tensor without materializing a full CPU contiguous copy."""
+
+    if chunk_bytes <= 0:
+        raise QuantizationExportError("streaming_chunk_bytes must be positive")
+    if int(tensor.numel()) == 0:
+        return
+    if int(tensor.dim()) == 0:
+        _write_tensor_bytes(handle, tensor)
+        return
+    row_count = int(tensor.shape[0])
+    row_bytes = (
+        int(tensor.numel()) * int(tensor.element_size()) // max(1, row_count)
+    )
+    rows_per_chunk = max(1, int(chunk_bytes) // max(1, row_bytes))
+    for start in range(0, row_count, rows_per_chunk):
+        _write_tensor_bytes(handle, tensor[start : start + rows_per_chunk])
+
+
+def _stream_quantized_weight(
+    handle: Any,
+    tensor: Any,
+    *,
+    execution_device_obj: Any,
+    convrot: bool,
+    group_size: int,
+    chunk_bytes: int,
+    tensor_name: str,
+) -> list[Any]:
+    scale_chunks: list[Any] = []
+    rows_per_chunk = _streaming_row_count(tensor, chunk_bytes=chunk_bytes)
+    for start in range(0, int(tensor.shape[0]), rows_per_chunk):
+        chunk = tensor[start : start + rows_per_chunk]
+        if chunk.device != execution_device_obj:
+            chunk = chunk.to(
+                device=execution_device_obj,
+                non_blocking=execution_device_obj.type == "cuda",
+            )
+        if not bool(_require_torch().isfinite(chunk).all().item()):
+            raise QuantizationExportError(
+                f"source tensor contains non-finite values: {tensor_name}"
+            )
+        quantized, scale, _rotated = _quantize_int8_tensorwise_per_row(
+            chunk,
+            convrot=convrot,
+            group_size=group_size,
+        )
+        _write_tensor_bytes(handle, quantized)
+        scale_chunks.append(scale.detach().to(device="cpu").contiguous())
+    return scale_chunks
+
+
+def _write_int8_convrot_checkpoint_streaming_from_specs(
+    *,
+    state_dict: Mapping[str, Any],
+    output_checkpoint: str | Path,
+    tensor_specs: Sequence[TensorSpec],
+    convrot: bool = True,
+    convrot_groupsize: int = CONVROT_GROUP_SIZE,
+    device: str = "cpu",
+    strict: bool = True,
+    validate_source_dtype: bool = True,
+    allowed_source_dtype_names: tuple[str, ...] = ("bfloat16", "float16"),
+    require_all_rotated: bool = True,
+    hash_output: bool = False,
+    metadata: Mapping[str, Any] | None = None,
+    quantization_preset: str = DEFAULT_ANIMA_QUANTIZATION_PRESET,
+    progress: Callable[[dict[str, Any]], None] | None = None,
+    streaming_chunk_bytes: int = DEFAULT_STREAMING_CHUNK_BYTES,
+) -> Int8ExportReport:
+    """Write a single stock safetensors file without retaining output tensors."""
+
+    torch = _require_torch()
+    _validate_state_dict_values(state_dict)
+    if convrot_groupsize <= 0:
+        raise QuantizationExportError("convrot_groupsize must be positive")
+    if convrot and not is_power_of_four(convrot_groupsize):
+        raise QuantizationExportError(
+            f"ConvRot groupsize must be a power of four, got {convrot_groupsize}"
+        )
+    if require_all_rotated and not convrot:
+        raise QuantizationExportError("require_all_rotated=True requires convrot=True")
+
+    selected = _validated_specs(tensor_specs)
+    selected_names = list(selected)
+    source_names = list(state_dict)
+    missing = sorted(set(selected_names) - set(source_names))
+    present_selected_names = [name for name in selected_names if name in state_dict]
+    if missing and strict:
+        preview = ", ".join(missing[:8])
+        suffix = "" if len(missing) <= 8 else f", ... ({len(missing)} total)"
+        raise QuantizationExportError(
+            f"source state_dict is missing selected tensors: {preview}{suffix}"
+        )
+    _check_generated_tensor_collisions(source_names, selected_names)
+    for name in selected_names:
+        tensor = state_dict.get(name)
+        if tensor is None:
+            continue
+        _validate_selected_tensor(
+            name,
+            tensor,
+            selected[name],
+            validate_source_dtype=bool(strict and validate_source_dtype),
+            allowed_source_dtype_names=allowed_source_dtype_names,
+        )
+        if require_all_rotated and int(tensor.shape[1]) % convrot_groupsize != 0:
+            raise QuantizationExportError(
+                f"ConvRot is required for every selected tensor, but {name} "
+                f"has in_features={tensor.shape[1]} which is not divisible by groupsize "
+                f"{convrot_groupsize}"
+            )
+
+    requested_device = str(device or "cpu")
+    execution_device_obj = _resolve_torch_device(requested_device)
+    execution_device = str(execution_device_obj)
+    if execution_device_obj.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(execution_device_obj)
+
+    marker = _marker_tensor(convrot=bool(convrot), group_size=convrot_groupsize)
+    tensor_entries: list[tuple[str, Any]] = []
+    for name, source_tensor in state_dict.items():
+        if name not in selected:
+            tensor_entries.append((name, source_tensor))
+            continue
+        layer = _layer_name_from_weight(name)
+        tensor_entries.extend(
+            (
+                (
+                    name,
+                    torch.empty(
+                        tuple(source_tensor.shape),
+                        dtype=torch.int8,
+                        device="meta",
+                    ),
+                ),
+                (
+                    f"{layer}.weight_scale",
+                    torch.empty(
+                        (int(source_tensor.shape[0]), 1),
+                        dtype=torch.float32,
+                        device="meta",
+                    ),
+                ),
+                (f"{layer}.comfy_quant", marker),
+            )
+        )
+    layouts = build_layouts(tensor_entries)
+
+    output_metadata: dict[str, Any] = dict(metadata or {})
+    output_metadata.update(
+        {
+            "artifact_target": "comfyui_diffusion_model",
+            "artifact_contract": _ARTIFACT_CONTRACT,
+            "target_dtype": INT8_TENSORWISE_FORMAT_NAME,
+            "quant_storage_dtype": "int8",
+            "scale_granularity": "per_channel",
+            "scale_axis": "out_features",
+            "convrot": bool(convrot),
+            "convrot_groupsize": int(convrot_groupsize),
+            "quantized_tensor_count": len(present_selected_names),
+        }
+    )
+    serialized_metadata = {
+        str(key): _metadata_value(value) for key, value in output_metadata.items()
+    }
+
+    writers: list[Callable[[Any], None]] = []
+    scale_chunks_by_name: dict[str, list[Any]] = {}
+    selected_index = 0
+    for name, source_tensor in state_dict.items():
+        if name not in selected:
+            writers.append(
+                lambda handle, tensor=source_tensor: _write_tensor_streaming(
+                    handle,
+                    tensor,
+                    chunk_bytes=streaming_chunk_bytes,
+                )
+            )
+            continue
+        selected_index += 1
+
+        def write_quantized(
+            handle: Any,
+            *,
+            tensor: Any = source_tensor,
+            tensor_name: str = name,
+            index: int = selected_index,
+        ) -> None:
+            scale_chunks_by_name[tensor_name] = _stream_quantized_weight(
+                handle,
+                tensor,
+                execution_device_obj=execution_device_obj,
+                convrot=convrot,
+                group_size=convrot_groupsize,
+                chunk_bytes=streaming_chunk_bytes,
+                tensor_name=tensor_name,
+            )
+            _emit_progress(
+                progress,
+                stage="quantize_tensor",
+                target_dtype=INT8_TENSORWISE_FORMAT_NAME,
+                tensor_name=tensor_name,
+                quantized_tensor_count=index,
+                selected_tensor_count=len(present_selected_names),
+                convrot=bool(convrot),
+                execution_device=execution_device,
+            )
+
+        def write_scales(
+            handle: Any,
+            *,
+            tensor_name: str = name,
+        ) -> None:
+            chunks = scale_chunks_by_name.pop(tensor_name, None)
+            if chunks is None:
+                raise QuantizationExportError(
+                    f"scale data was not produced for {tensor_name}"
+                )
+            for chunk in chunks:
+                _write_tensor_bytes(handle, chunk)
+
+        writers.extend(
+            (
+                write_quantized,
+                write_scales,
+                lambda handle, tensor=marker: _write_tensor_bytes(handle, tensor),
+            )
+        )
+
+    output_path = Path(output_checkpoint).expanduser()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    _emit_progress(
+        progress,
+        stage="prepare",
+        target_dtype=INT8_TENSORWISE_FORMAT_NAME,
+        requested_device=requested_device,
+        execution_device=execution_device,
+        source_file_count=0,
+        selected_tensor_count=len(present_selected_names),
+        convrot=bool(convrot),
+    )
+    _emit_progress(
+        progress,
+        stage="save_checkpoint",
+        output_checkpoint=str(output_path),
+        output_tensor_count=len(layouts),
+        output_tensor_device="cpu",
+    )
+    try:
+        write_streaming_file(output_path, layouts, serialized_metadata, writers)
+    except SafetensorsStreamError as exc:
+        raise QuantizationExportError(str(exc)) from exc
+
+    cuda_peak_allocated: int | None = None
+    cuda_peak_reserved: int | None = None
+    if execution_device_obj.type == "cuda":
+        torch.cuda.synchronize(execution_device_obj)
+        cuda_peak_allocated = int(torch.cuda.max_memory_allocated(execution_device_obj))
+        cuda_peak_reserved = int(torch.cuda.max_memory_reserved(execution_device_obj))
+        torch.cuda.empty_cache()
+
+    output_hash = ""
+    output_hash_state = "not_requested"
+    if hash_output:
+        _emit_progress(progress, stage="hash_checkpoint", output_checkpoint=str(output_path))
+        output_hash = _hash_file(output_path)
+        output_hash_state = "written"
+    output_bytes = output_path.stat().st_size
+    copied = len(state_dict) - len(present_selected_names)
+    output_tensor_count = len(layouts)
+    dtype_counts: dict[str, int] = {}
+    for name, source_tensor in state_dict.items():
+        dtype_name = (
+            "int8" if name in selected else str(source_tensor.dtype).removeprefix("torch.")
+        )
+        dtype_counts[dtype_name] = dtype_counts.get(dtype_name, 0) + 1
+    dtype_counts["float32"] = dtype_counts.get("float32", 0) + len(
+        present_selected_names
+    )
+    dtype_counts["uint8"] = dtype_counts.get("uint8", 0) + len(
+        present_selected_names
+    )
+    written_files = [
+        {
+            "path": str(output_path),
+            "kind": "int8_tensorwise_inference_checkpoint",
+            "state": "written",
+            "tensor_count": output_tensor_count,
+            "bytes": output_bytes,
+            "hash": output_hash,
+            "hash_state": output_hash_state,
+        }
+    ]
+    return Int8ExportReport(
+        source_checkpoint="<state_dict>",
+        output_checkpoint=str(output_path),
+        quantized_tensor_count=len(present_selected_names),
+        copied_tensor_count=copied,
+        output_tensor_count=output_tensor_count,
+        requested_device=requested_device,
+        execution_device=execution_device,
+        convrot=bool(convrot),
+        convrot_groupsize=int(convrot_groupsize),
+        rotated_tensor_count=len(present_selected_names) if convrot else 0,
+        nonrotated_tensor_count=0 if convrot else len(present_selected_names),
+        quantization_preset=quantization_preset,
+        source_tensor_count=len(state_dict),
+        missing_tensor_count=len(missing),
+        missing_tensors=missing,
+        quant_metadata_tensor_count=len(present_selected_names),
+        scale_tensor_count=len(present_selected_names),
+        output_bytes=output_bytes,
+        output_hash=output_hash,
+        output_hash_state=output_hash_state,
+        cuda_max_memory_allocated_bytes=cuda_peak_allocated,
+        cuda_max_memory_reserved_bytes=cuda_peak_reserved,
+        dtype_counts=dict(sorted(dtype_counts.items())),
+        written_files=written_files,
+    )
 
 
 def _validate_state_dict_values(state_dict: Mapping[str, Any]) -> None:
@@ -542,6 +892,7 @@ def _export_int8_convrot_from_state_dict(
     hash_output: bool = False,
     metadata: Mapping[str, Any] | None = None,
     progress: Callable[[dict[str, Any]], None] | None = None,
+    writer: Callable[..., Int8ExportReport] = _write_int8_convrot_checkpoint_from_specs,
 ) -> Int8ExportReport:
     if convrot_groupsize <= 0:
         raise QuantizationExportError("convrot_groupsize must be positive")
@@ -554,7 +905,7 @@ def _export_int8_convrot_from_state_dict(
     output_metadata = dict(metadata or {})
     output_metadata.setdefault("model_family", family)
     output_metadata.setdefault("quantization_preset", quantization_preset)
-    return _write_int8_convrot_checkpoint_from_specs(
+    return writer(
         state_dict=state_dict,
         output_checkpoint=output_checkpoint,
         tensor_specs=tensor_specs,
@@ -696,6 +1047,7 @@ def export_minimax_h3_int8_convrot_from_state_dict(
         metadata=metadata,
         quantization_preset=quantization_preset,
         progress=progress,
+        writer=_write_int8_convrot_checkpoint_streaming_from_specs,
     )
 
 

@@ -363,6 +363,104 @@ def test_small_export_report_and_header_metadata(tmp_path):
     assert metadata["custom_number"] == "7"
 
 
+def test_streaming_writer_matches_in_memory_writer_across_row_chunks(tmp_path):
+    torch = pytest.importorskip("torch")
+    safetensors_torch = pytest.importorskip("safetensors.torch")
+    safetensors = pytest.importorskip("safetensors")
+    spec = _small_spec()
+    generator = torch.Generator().manual_seed(20260813)
+    state = {
+        spec.name: torch.randn(spec.shape, dtype=torch.bfloat16, generator=generator),
+        "net.final_layer.linear.weight": torch.randn(
+            (5, 3), dtype=torch.float32, generator=generator
+        ).T,
+    }
+    snapshots = {name: tensor.clone() for name, tensor in state.items()}
+    common = {
+        "state_dict": state,
+        "tensor_specs": (spec,),
+        "convrot": True,
+        "convrot_groupsize": 256,
+        "device": "cpu",
+        "validate_source_dtype": True,
+        "metadata": {"model_family": "test", "custom_number": 7},
+    }
+    legacy_path = tmp_path / "legacy.safetensors"
+    streaming_path = tmp_path / "streaming.safetensors"
+
+    legacy_report = export._write_int8_convrot_checkpoint_from_specs(
+        output_checkpoint=legacy_path,
+        **common,
+    )
+    streaming_report = export._write_int8_convrot_checkpoint_streaming_from_specs(
+        output_checkpoint=streaming_path,
+        streaming_chunk_bytes=2 * 256 * 2,
+        **common,
+    )
+
+    legacy = safetensors_torch.load_file(str(legacy_path))
+    streaming = safetensors_torch.load_file(str(streaming_path))
+    assert set(streaming) == set(legacy)
+    assert all(torch.equal(streaming[name], legacy[name]) for name in legacy)
+    with safetensors.safe_open(str(legacy_path), framework="pt") as handle:
+        legacy_metadata = handle.metadata()
+    with safetensors.safe_open(str(streaming_path), framework="pt") as handle:
+        streaming_metadata = handle.metadata()
+    assert streaming_metadata == legacy_metadata
+    assert streaming_report.quantized_tensor_count == legacy_report.quantized_tensor_count
+    assert streaming_report.copied_tensor_count == legacy_report.copied_tensor_count
+    assert streaming_report.output_tensor_count == legacy_report.output_tensor_count
+    assert all(torch.equal(state[name], snapshot) for name, snapshot in snapshots.items())
+
+
+def test_streaming_writer_removes_partial_output_after_quantization_failure(
+    tmp_path, monkeypatch
+):
+    torch = pytest.importorskip("torch")
+    spec = _small_spec()
+    output = tmp_path / "partial.safetensors"
+    original = export._quantize_int8_tensorwise_per_row
+    calls = 0
+
+    def fail_second_chunk(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("synthetic chunk failure")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(export, "_quantize_int8_tensorwise_per_row", fail_second_chunk)
+    with pytest.raises(RuntimeError, match="synthetic chunk failure"):
+        export._write_int8_convrot_checkpoint_streaming_from_specs(
+            state_dict={spec.name: torch.zeros(spec.shape, dtype=torch.bfloat16)},
+            output_checkpoint=output,
+            tensor_specs=(spec,),
+            streaming_chunk_bytes=2 * 256 * 2,
+        )
+    assert not output.exists()
+
+
+def test_streaming_writer_supports_missing_selected_tensors_when_not_strict(tmp_path):
+    torch = pytest.importorskip("torch")
+    safetensors_torch = pytest.importorskip("safetensors.torch")
+    spec = _small_spec()
+    output = tmp_path / "nonstrict.safetensors"
+
+    report = export._write_int8_convrot_checkpoint_streaming_from_specs(
+        state_dict={"kept.weight": torch.ones((2, 3), dtype=torch.float32)},
+        output_checkpoint=output,
+        tensor_specs=(spec,),
+        strict=False,
+    )
+
+    loaded = safetensors_torch.load_file(str(output))
+    assert set(loaded) == {"kept.weight"}
+    assert report.quantized_tensor_count == 0
+    assert report.copied_tensor_count == 1
+    assert report.output_tensor_count == 1
+    assert report.missing_tensors == [spec.name]
+
+
 def test_export_reuses_cpu_storage_but_clones_shared_aliases(tmp_path, monkeypatch):
     torch = pytest.importorskip("torch")
     spec = _small_spec()

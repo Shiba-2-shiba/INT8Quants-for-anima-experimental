@@ -16,6 +16,7 @@ from .quantization import (
     export_krea2_int8_convrot_from_state_dict,
     export_minimax_h3_int8_convrot_from_state_dict,
 )
+from .quantization.export import DEFAULT_STREAMING_CHUNK_BYTES
 from .quantization.anima import (
     ANIMA_QUANTIZATION_PRESETS,
     DEFAULT_ANIMA_QUANTIZATION_PRESET,
@@ -73,7 +74,7 @@ _MINIMAX_H3_RUNTIME_CONFIG_KEYS = frozenset({"dtype"})
 _MINIMAX_H3_SOURCE_DTYPES = frozenset({"torch.bfloat16", "torch.float32"})
 MINIMAX_H3_MEMORY_HEADROOM_RATIO = 1.20
 MINIMAX_H3_QUANT_MARKER_BYTES = 72
-MINIMAX_H3_WORKSPACE_COPIES = 2
+MINIMAX_H3_WORKSPACE_COPIES = 6
 
 
 class QuantizationNodeError(RuntimeError):
@@ -119,7 +120,7 @@ class OutputPaths:
 @dataclass(frozen=True)
 class MiniMaxH3MemoryEstimate:
     source_bytes: int
-    retained_output_bytes: int
+    output_file_bytes: int
     workspace_bytes: int
     estimated_peak_bytes: int
     required_additional_bytes: int
@@ -292,11 +293,11 @@ def estimate_state_dict_bytes(state_dict: Mapping[str, Any]) -> int:
 def estimate_minimax_h3_memory(
     state_dict: Mapping[str, Any],
 ) -> MiniMaxH3MemoryEstimate:
-    """Conservatively estimate peak and still-required memory for the H3 writer."""
+    """Estimate H3 streaming output size and bounded quantization workspace."""
 
     selected_names = set(get_minimax_h3_tensor_names())
     source_bytes = 0
-    retained_output_bytes = 0
+    output_file_bytes = 0
     workspace_bytes = 0
     for name, tensor in state_dict.items():
         numel = getattr(tensor, "numel", None)
@@ -307,29 +308,26 @@ def estimate_minimax_h3_memory(
         tensor_bytes = tensor_numel * int(element_size())
         source_bytes += tensor_bytes
         if name not in selected_names:
-            retained_output_bytes += tensor_bytes
+            output_file_bytes += tensor_bytes
             continue
         shape = getattr(tensor, "shape", ())
         rows = int(shape[0]) if shape else 0
-        retained_output_bytes += (
+        output_file_bytes += (
             tensor_numel + rows * 4 + MINIMAX_H3_QUANT_MARKER_BYTES
         )
         workspace_bytes = max(
             workspace_bytes,
-            tensor_bytes * MINIMAX_H3_WORKSPACE_COPIES,
+            min(tensor_bytes, DEFAULT_STREAMING_CHUNK_BYTES)
+            * MINIMAX_H3_WORKSPACE_COPIES,
         )
 
-    estimated_peak_bytes = math.ceil(
-        (source_bytes + retained_output_bytes + workspace_bytes)
-        * MINIMAX_H3_MEMORY_HEADROOM_RATIO
-    )
     required_additional_bytes = math.ceil(
-        (retained_output_bytes + workspace_bytes)
-        * MINIMAX_H3_MEMORY_HEADROOM_RATIO
+        workspace_bytes * MINIMAX_H3_MEMORY_HEADROOM_RATIO
     )
+    estimated_peak_bytes = source_bytes + required_additional_bytes
     return MiniMaxH3MemoryEstimate(
         source_bytes=source_bytes,
-        retained_output_bytes=retained_output_bytes,
+        output_file_bytes=output_file_bytes,
         workspace_bytes=workspace_bytes,
         estimated_peak_bytes=estimated_peak_bytes,
         required_additional_bytes=required_additional_bytes,
@@ -388,9 +386,17 @@ def _preflight_minimax_h3_memory(
     return estimate, available_bytes
 
 
-def _ensure_output_capacity(output_directory: Path, state_dict: Mapping[str, Any]) -> None:
-    source_bytes = estimate_state_dict_bytes(state_dict)
-    required_bytes = source_bytes + DISK_HEADROOM_BYTES
+def _ensure_output_capacity(
+    output_directory: Path,
+    state_dict: Mapping[str, Any],
+    *,
+    required_output_bytes: int | None = None,
+) -> None:
+    required_bytes = (
+        estimate_state_dict_bytes(state_dict)
+        if required_output_bytes is None
+        else int(required_output_bytes)
+    ) + DISK_HEADROOM_BYTES
     free_bytes = int(shutil.disk_usage(output_directory).free)
     if free_bytes < required_bytes:
         raise QuantizationNodeError(
@@ -498,6 +504,7 @@ def _export_int8_convrot(
     expected_count: int,
     expected_copied_count: int | None = None,
     validate_source_dtype: bool = False,
+    required_output_bytes: int | None = None,
     additional_report_fields: Mapping[str, Any] | None = None,
     default_exporter: Callable[..., Any],
     device: str,
@@ -519,7 +526,11 @@ def _export_int8_convrot(
         )
     try:
         paths.checkpoint.parent.mkdir(parents=True, exist_ok=True)
-        _ensure_output_capacity(paths.checkpoint.parent, state_dict)
+        _ensure_output_capacity(
+            paths.checkpoint.parent,
+            state_dict,
+            required_output_bytes=required_output_bytes,
+        )
     except QuantizationNodeError:
         raise
     except OSError as exc:
@@ -726,6 +737,8 @@ def export_minimax_h3_int8_convrot(
         "estimated_peak_memory_bytes": memory_estimate.estimated_peak_bytes,
         "required_additional_memory_bytes": memory_estimate.required_additional_bytes,
         "available_memory_bytes_at_preflight": available_memory_bytes,
+        "estimated_output_file_bytes": memory_estimate.output_file_bytes,
+        "streaming_chunk_bytes": DEFAULT_STREAMING_CHUNK_BYTES,
     }
     return _export_int8_convrot(
         state_dict=state_dict,
@@ -736,6 +749,7 @@ def export_minimax_h3_int8_convrot(
         expected_count=expected_minimax_h3_quantized_tensors(quantization_preset),
         expected_copied_count=EXPECTED_KEEP_TENSOR_COUNT,
         validate_source_dtype=True,
+        required_output_bytes=memory_estimate.output_file_bytes,
         additional_report_fields=memory_report,
         default_exporter=export_minimax_h3_int8_convrot_from_state_dict,
         device=device,
