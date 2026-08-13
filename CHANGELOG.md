@@ -21,3 +21,8 @@ All notable changes are documented here. Versions follow semantic versioning.
   writer while preserving the existing Anima node ID and public export API.
 - Validate Krea2's native namespace against stock ComfyUI model detection and
   document the official checkpoints and model-license boundary.
+- Add a MiniMax H3 INT8 ConvRot output node for the official 50-block,
+  two-token-refiner curve-form architecture, with an exact 200-matrix
+  reference-derived selection and fail-closed effective-config validation.
+- Document the MiniMax H3 keep boundary and provisional high-memory release
+  validation gate without loading the 20.97 GB reference checkpoint in tests.

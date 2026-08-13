@@ -7,6 +7,7 @@ from .export import (
     QuantizationExportError,
     export_anima_int8_convrot_from_state_dict,
     export_krea2_int8_convrot_from_state_dict,
+    export_minimax_h3_int8_convrot_from_state_dict,
 )
 
 __all__ = [
@@ -15,4 +16,5 @@ __all__ = [
     "QuantizationExportError",
     "export_anima_int8_convrot_from_state_dict",
     "export_krea2_int8_convrot_from_state_dict",
+    "export_minimax_h3_int8_convrot_from_state_dict",
 ]

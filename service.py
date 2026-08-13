@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import uuid
@@ -13,6 +14,7 @@ from .quantization import (
     QuantizationExportError,
     export_anima_int8_convrot_from_state_dict,
     export_krea2_int8_convrot_from_state_dict,
+    export_minimax_h3_int8_convrot_from_state_dict,
 )
 from .quantization.anima import (
     ANIMA_QUANTIZATION_PRESETS,
@@ -28,12 +30,23 @@ from .quantization.krea2 import (
     expected_quantized_tensors as _expected_krea2_quantized_tensors,
     validate_krea2_state_dict,
 )
+from .quantization.minimax_h3 import (
+    EXPECTED_KEEP_TENSOR_COUNT,
+    MINIMAX_H3_QUANTIZATION_PRESETS,
+    DEFAULT_MINIMAX_H3_QUANTIZATION_PRESET,
+    MiniMaxH3ContractError,
+    expected_quantized_tensors as _expected_minimax_h3_quantized_tensors,
+    get_minimax_h3_tensor_names,
+    validate_minimax_h3_state_dict,
+)
 
 DIFFUSION_PREFIX = "diffusion_model."
 DEFAULT_QUANTIZATION_PRESET = DEFAULT_ANIMA_QUANTIZATION_PRESET
 QUANTIZATION_PRESETS = ANIMA_QUANTIZATION_PRESETS
 DEFAULT_KREA2_PRESET = DEFAULT_KREA2_QUANTIZATION_PRESET
 KREA2_PRESETS = KREA2_QUANTIZATION_PRESETS
+DEFAULT_MINIMAX_H3_PRESET = DEFAULT_MINIMAX_H3_QUANTIZATION_PRESET
+MINIMAX_H3_PRESETS = MINIMAX_H3_QUANTIZATION_PRESETS
 DISK_HEADROOM_BYTES = 64 * 1024 * 1024
 _INVALID_FILENAME_CHARS = frozenset('<>:"|?*')
 _WINDOWS_RESERVED_NAMES = frozenset(
@@ -41,6 +54,26 @@ _WINDOWS_RESERVED_NAMES = frozenset(
     | {f"COM{index}" for index in range(1, 10)}
     | {f"LPT{index}" for index in range(1, 10)}
 )
+_MINIMAX_H3_REFERENCE_CONFIG = {
+    "image_model": "minimax_h3",
+    "num_layers": 50,
+    "token_refiner_num_layers": 2,
+    "hidden_size": 5376,
+    "latents_dim": 24,
+    "audio_latents_dim": 32,
+    "attention_head_dim": 128,
+    "num_attention_heads": 56,
+    "ffn_hidden_size": 14336,
+    "text_dim": 5120,
+    "adaln_curve_grid": 1025,
+    "time_embed_dim": 8,
+    "rope_inv_freq_len": 16,
+}
+_MINIMAX_H3_RUNTIME_CONFIG_KEYS = frozenset({"dtype"})
+_MINIMAX_H3_SOURCE_DTYPES = frozenset({"torch.bfloat16", "torch.float32"})
+MINIMAX_H3_MEMORY_HEADROOM_RATIO = 1.20
+MINIMAX_H3_QUANT_MARKER_BYTES = 72
+MINIMAX_H3_WORKSPACE_COPIES = 2
 
 
 class QuantizationNodeError(RuntimeError):
@@ -67,10 +100,29 @@ def expected_krea2_quantized_tensors(quantization_preset: str) -> int:
         ) from exc
 
 
+def expected_minimax_h3_quantized_tensors(quantization_preset: str) -> int:
+    try:
+        return _expected_minimax_h3_quantized_tensors(quantization_preset)
+    except MiniMaxH3ContractError as exc:
+        supported = ", ".join(MINIMAX_H3_PRESETS)
+        raise QuantizationNodeError(
+            f"Unsupported quantization_preset {quantization_preset!r}; expected one of: {supported}."
+        ) from exc
+
+
 @dataclass(frozen=True)
 class OutputPaths:
     checkpoint: Path
     report: Path
+
+
+@dataclass(frozen=True)
+class MiniMaxH3MemoryEstimate:
+    source_bytes: int
+    retained_output_bytes: int
+    workspace_bytes: int
+    estimated_peak_bytes: int
+    required_additional_bytes: int
 
 
 def _is_int8_tensor(tensor: Any) -> bool:
@@ -174,6 +226,59 @@ def extract_krea2_state_dict(model: Any) -> dict[str, Any]:
     return state_dict
 
 
+def _validate_minimax_h3_effective_config(model: Any) -> None:
+    model_config = getattr(getattr(model, "model", None), "model_config", None)
+    unet_config = getattr(model_config, "unet_config", None)
+    if not isinstance(unet_config, Mapping):
+        raise QuantizationNodeError(
+            "MiniMax H3 effective config is unavailable. Use the MODEL output directly from "
+            "the current stock ComfyUI Load Diffusion Model node."
+        )
+
+    mismatches = {
+        key: (expected, unet_config.get(key, "<missing>"))
+        for key, expected in _MINIMAX_H3_REFERENCE_CONFIG.items()
+        if unet_config.get(key, "<missing>") != expected
+    }
+    unexpected = sorted(
+        set(unet_config) - set(_MINIMAX_H3_REFERENCE_CONFIG) - _MINIMAX_H3_RUNTIME_CONFIG_KEYS
+    )
+    source_dtype = unet_config.get("dtype")
+    invalid_dtype = str(source_dtype) not in _MINIMAX_H3_SOURCE_DTYPES
+    if mismatches or unexpected or invalid_dtype:
+        details = [
+            f"{key}: expected {expected!r}, got {actual!r}"
+            for key, (expected, actual) in sorted(mismatches.items())
+        ]
+        if unexpected:
+            details.append(f"unexpected transformer config keys: {', '.join(unexpected)}")
+        if invalid_dtype:
+            details.append(
+                "dtype: expected torch.bfloat16 or torch.float32, "
+                f"got {source_dtype!r}"
+            )
+        raise QuantizationNodeError(
+            "MiniMax H3 effective config does not match the official curve-form reference: "
+            + "; ".join(details)
+        )
+
+
+def extract_minimax_h3_state_dict(model: Any) -> dict[str, Any]:
+    """Extract the exact official MiniMax H3 curve-form diffusion namespace."""
+
+    state_dict = _extract_diffusion_state_dict(
+        model,
+        node_display_name="MiniMax H3 INT8 ConvRot Save",
+        normalize_key=lambda key: key,
+    )
+    try:
+        validate_minimax_h3_state_dict(state_dict, require_selected_tensors=False)
+    except MiniMaxH3ContractError as exc:
+        raise QuantizationNodeError(str(exc)) from exc
+    _validate_minimax_h3_effective_config(model)
+    return state_dict
+
+
 def estimate_state_dict_bytes(state_dict: Mapping[str, Any]) -> int:
     total = 0
     for tensor in state_dict.values():
@@ -182,6 +287,105 @@ def estimate_state_dict_bytes(state_dict: Mapping[str, Any]) -> int:
         if callable(numel) and callable(element_size):
             total += int(numel()) * int(element_size())
     return total
+
+
+def estimate_minimax_h3_memory(
+    state_dict: Mapping[str, Any],
+) -> MiniMaxH3MemoryEstimate:
+    """Conservatively estimate peak and still-required memory for the H3 writer."""
+
+    selected_names = set(get_minimax_h3_tensor_names())
+    source_bytes = 0
+    retained_output_bytes = 0
+    workspace_bytes = 0
+    for name, tensor in state_dict.items():
+        numel = getattr(tensor, "numel", None)
+        element_size = getattr(tensor, "element_size", None)
+        if not callable(numel) or not callable(element_size):
+            continue
+        tensor_numel = int(numel())
+        tensor_bytes = tensor_numel * int(element_size())
+        source_bytes += tensor_bytes
+        if name not in selected_names:
+            retained_output_bytes += tensor_bytes
+            continue
+        shape = getattr(tensor, "shape", ())
+        rows = int(shape[0]) if shape else 0
+        retained_output_bytes += (
+            tensor_numel + rows * 4 + MINIMAX_H3_QUANT_MARKER_BYTES
+        )
+        workspace_bytes = max(
+            workspace_bytes,
+            tensor_bytes * MINIMAX_H3_WORKSPACE_COPIES,
+        )
+
+    estimated_peak_bytes = math.ceil(
+        (source_bytes + retained_output_bytes + workspace_bytes)
+        * MINIMAX_H3_MEMORY_HEADROOM_RATIO
+    )
+    required_additional_bytes = math.ceil(
+        (retained_output_bytes + workspace_bytes)
+        * MINIMAX_H3_MEMORY_HEADROOM_RATIO
+    )
+    return MiniMaxH3MemoryEstimate(
+        source_bytes=source_bytes,
+        retained_output_bytes=retained_output_bytes,
+        workspace_bytes=workspace_bytes,
+        estimated_peak_bytes=estimated_peak_bytes,
+        required_additional_bytes=required_additional_bytes,
+    )
+
+
+def _available_memory_bytes() -> int | None:
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            class _MemoryStatusEx(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            status = _MemoryStatusEx()
+            status.dwLength = ctypes.sizeof(status)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return int(status.ullAvailPhys)
+        except (AttributeError, OSError, ValueError):
+            return None
+        return None
+
+    try:
+        available_pages = int(os.sysconf("SC_AVPHYS_PAGES"))
+        page_size = int(os.sysconf("SC_PAGE_SIZE"))
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+    return available_pages * page_size
+
+
+def _preflight_minimax_h3_memory(
+    state_dict: Mapping[str, Any],
+) -> tuple[MiniMaxH3MemoryEstimate, int | None]:
+    estimate = estimate_minimax_h3_memory(state_dict)
+    available_bytes = _available_memory_bytes()
+    if (
+        available_bytes is not None
+        and available_bytes < estimate.required_additional_bytes
+    ):
+        raise QuantizationNodeError(
+            "Insufficient available system memory for MiniMax H3 export: "
+            f"required_additional={estimate.required_additional_bytes}, "
+            f"available={available_bytes}, "
+            f"estimated_peak={estimate.estimated_peak_bytes}."
+        )
+    return estimate, available_bytes
 
 
 def _ensure_output_capacity(output_directory: Path, state_dict: Mapping[str, Any]) -> None:
@@ -292,6 +496,9 @@ def _export_int8_convrot(
     project: str,
     model_display_name: str,
     expected_count: int,
+    expected_copied_count: int | None = None,
+    validate_source_dtype: bool = False,
+    additional_report_fields: Mapping[str, Any] | None = None,
     default_exporter: Callable[..., Any],
     device: str,
     overwrite: bool,
@@ -336,7 +543,7 @@ def _export_int8_convrot(
                 convrot_groupsize=256,
                 device=device,
                 strict=True,
-                validate_source_dtype=False,
+                validate_source_dtype=validate_source_dtype,
                 quantization_preset=quantization_preset,
                 require_all_rotated=True,
                 hash_output=hash_output,
@@ -347,16 +554,34 @@ def _export_int8_convrot(
                 },
                 progress=progress,
             )
-        except (AnimaContractError, Krea2ContractError, QuantizationExportError) as exc:
+        except (
+            AnimaContractError,
+            Krea2ContractError,
+            MiniMaxH3ContractError,
+            QuantizationExportError,
+        ) as exc:
             raise QuantizationNodeError(str(exc)) from exc
         report = _report_to_dict(report_object)
+        if additional_report_fields:
+            report.update(additional_report_fields)
         quantized_count = int(report.get("quantized_tensor_count", -1))
         rotated_count = int(report.get("rotated_tensor_count", -1))
-        if quantized_count != expected_count or rotated_count != quantized_count:
+        copied_count = int(report.get("copied_tensor_count", -1))
+        copied_mismatch = (
+            expected_copied_count is not None
+            and copied_count != expected_copied_count
+        )
+        if (
+            quantized_count != expected_count
+            or rotated_count != quantized_count
+            or copied_mismatch
+        ):
             raise QuantizationNodeError(
                 "Unexpected quantization result: "
                 f"quantized={quantized_count}, rotated={rotated_count}, "
-                f"expected={expected_count}, preset={quantization_preset}."
+                f"copied={copied_count}, expected_quantized={expected_count}, "
+                f"expected_copied={expected_copied_count}, "
+                f"preset={quantization_preset}."
             )
         if not temporary.is_file():
             raise QuantizationNodeError("The internal quantizer completed without writing the checkpoint.")
@@ -472,6 +697,47 @@ def export_krea2_int8_convrot(
         model_display_name="Krea2",
         expected_count=expected_krea2_quantized_tensors(quantization_preset),
         default_exporter=export_krea2_int8_convrot_from_state_dict,
+        device=device,
+        overwrite=overwrite,
+        write_report=write_report,
+        hash_output=hash_output,
+        quantization_preset=quantization_preset,
+        progress=progress,
+        exporter=exporter,
+    )
+
+
+def export_minimax_h3_int8_convrot(
+    *,
+    state_dict: Mapping[str, Any],
+    paths: OutputPaths,
+    device: str,
+    overwrite: bool,
+    write_report: bool,
+    hash_output: bool,
+    quantization_preset: str = DEFAULT_MINIMAX_H3_PRESET,
+    progress: Callable[[dict[str, Any]], None] | None = None,
+    exporter: Callable[..., Any] | None = None,
+) -> tuple[dict[str, Any], str]:
+    memory_estimate, available_memory_bytes = _preflight_minimax_h3_memory(
+        state_dict
+    )
+    memory_report = {
+        "estimated_peak_memory_bytes": memory_estimate.estimated_peak_bytes,
+        "required_additional_memory_bytes": memory_estimate.required_additional_bytes,
+        "available_memory_bytes_at_preflight": available_memory_bytes,
+    }
+    return _export_int8_convrot(
+        state_dict=state_dict,
+        paths=paths,
+        family="minimax_h3",
+        project="minimax-h3-int8-convrot",
+        model_display_name="MiniMax H3",
+        expected_count=expected_minimax_h3_quantized_tensors(quantization_preset),
+        expected_copied_count=EXPECTED_KEEP_TENSOR_COUNT,
+        validate_source_dtype=True,
+        additional_report_fields=memory_report,
+        default_exporter=export_minimax_h3_int8_convrot_from_state_dict,
         device=device,
         overwrite=overwrite,
         write_report=write_report,

@@ -5,7 +5,7 @@
 # Derived from Comfy-Org/comfy-quants at
 # 1e0d481f24847c4914578f5468917902ad53ea46, principally
 # comfy_quants/backends/int8_tensorwise_model_export.py and comfy_quants/api.py.
-# This version is limited to the in-memory Anima and Krea2 INT8 ConvRot paths.
+# This version is limited to the in-memory Anima, Krea2, and MiniMax H3 paths.
 
 """Write self-contained INT8 ConvRot checkpoints for stock ComfyUI."""
 
@@ -27,6 +27,10 @@ from .convrot import CONVROT_GROUP_SIZE, build_hadamard, is_power_of_four, rotat
 from .krea2 import (
     DEFAULT_KREA2_QUANTIZATION_PRESET,
     validate_krea2_state_dict,
+)
+from .minimax_h3 import (
+    DEFAULT_MINIMAX_H3_QUANTIZATION_PRESET,
+    validate_minimax_h3_state_dict,
 )
 
 INT8_TENSORWISE_FORMAT_NAME = "int8_tensorwise"
@@ -245,6 +249,7 @@ def _validate_selected_tensor(
     spec: TensorSpec,
     *,
     validate_source_dtype: bool,
+    allowed_source_dtype_names: tuple[str, ...],
 ) -> None:
     torch = _require_torch()
     actual_shape = tuple(int(dimension) for dimension in tensor.shape)
@@ -262,9 +267,13 @@ def _validate_selected_tensor(
             f"source tensor dtype mismatch for {name}: expected a floating-point tensor, "
             f"got {tensor.dtype}"
         )
-    if validate_source_dtype and tensor.dtype not in (torch.bfloat16, torch.float16):
+    allowed_source_dtypes = tuple(
+        getattr(torch, dtype_name) for dtype_name in allowed_source_dtype_names
+    )
+    if validate_source_dtype and tensor.dtype not in allowed_source_dtypes:
+        expected = " or ".join(allowed_source_dtype_names)
         raise QuantizationExportError(
-            f"source tensor dtype mismatch for {name}: expected bfloat16 or float16, "
+            f"source tensor dtype mismatch for {name}: expected {expected}, "
             f"got {tensor.dtype}"
         )
 
@@ -296,6 +305,7 @@ def _write_int8_convrot_checkpoint_from_specs(
     device: str = "cpu",
     strict: bool = True,
     validate_source_dtype: bool = True,
+    allowed_source_dtype_names: tuple[str, ...] = ("bfloat16", "float16"),
     require_all_rotated: bool = True,
     hash_output: bool = False,
     metadata: Mapping[str, Any] | None = None,
@@ -337,6 +347,7 @@ def _write_int8_convrot_checkpoint_from_specs(
             tensor,
             selected[name],
             validate_source_dtype=bool(strict and validate_source_dtype),
+            allowed_source_dtype_names=allowed_source_dtype_names,
         )
         if require_all_rotated and int(tensor.shape[1]) % convrot_groupsize != 0:
             raise QuantizationExportError(
@@ -525,6 +536,7 @@ def _export_int8_convrot_from_state_dict(
     device: str = "cpu",
     strict: bool = True,
     validate_source_dtype: bool = True,
+    allowed_source_dtype_names: tuple[str, ...] = ("bfloat16", "float16"),
     quantization_preset: str,
     require_all_rotated: bool = True,
     hash_output: bool = False,
@@ -551,6 +563,7 @@ def _export_int8_convrot_from_state_dict(
         device=device,
         strict=strict,
         validate_source_dtype=validate_source_dtype,
+        allowed_source_dtype_names=allowed_source_dtype_names,
         require_all_rotated=require_all_rotated,
         hash_output=hash_output,
         metadata=output_metadata,
@@ -644,10 +657,53 @@ def export_krea2_int8_convrot_from_state_dict(
     )
 
 
+def export_minimax_h3_int8_convrot_from_state_dict(
+    *,
+    state_dict: Mapping[str, Any],
+    output_checkpoint: str | Path,
+    family: str = "minimax_h3",
+    convrot: bool = True,
+    convrot_groupsize: int = CONVROT_GROUP_SIZE,
+    device: str = "cpu",
+    strict: bool = True,
+    validate_source_dtype: bool = True,
+    quantization_preset: str = DEFAULT_MINIMAX_H3_QUANTIZATION_PRESET,
+    require_all_rotated: bool = True,
+    hash_output: bool = False,
+    metadata: Mapping[str, Any] | None = None,
+    progress: Callable[[dict[str, Any]], None] | None = None,
+) -> Int8ExportReport:
+    """Export the official curve-form MiniMax H3 layout for stock ComfyUI."""
+
+    if family != "minimax_h3":
+        raise QuantizationExportError(
+            "unsupported INT8 state_dict family "
+            f"{family!r}: only family='minimax_h3' is supported"
+        )
+    return _export_int8_convrot_from_state_dict(
+        state_dict=state_dict,
+        output_checkpoint=output_checkpoint,
+        family=family,
+        validator=validate_minimax_h3_state_dict,
+        convrot=convrot,
+        convrot_groupsize=convrot_groupsize,
+        device=device,
+        strict=strict,
+        validate_source_dtype=validate_source_dtype,
+        allowed_source_dtype_names=("bfloat16", "float32"),
+        require_all_rotated=require_all_rotated,
+        hash_output=hash_output,
+        metadata=metadata,
+        quantization_preset=quantization_preset,
+        progress=progress,
+    )
+
+
 __all__ = [
     "AnimaInt8ExportReport",
     "Int8ExportReport",
     "QuantizationExportError",
     "export_anima_int8_convrot_from_state_dict",
     "export_krea2_int8_convrot_from_state_dict",
+    "export_minimax_h3_int8_convrot_from_state_dict",
 ]
