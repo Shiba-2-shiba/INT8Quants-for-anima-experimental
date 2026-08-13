@@ -25,9 +25,10 @@ SPEC.loader.exec_module(service)
 
 
 class FakeTensor:
-    def __init__(self, shape, dtype="torch.float32"):
+    def __init__(self, shape, dtype="torch.float32", element_bytes=4):
         self.shape = shape
         self.dtype = dtype
+        self.element_bytes = element_bytes
 
     def numel(self):
         result = 1
@@ -36,7 +37,7 @@ class FakeTensor:
         return result
 
     def element_size(self):
-        return 4
+        return self.element_bytes
 
 
 def anima_state_dict(channels=2048):
@@ -58,6 +59,93 @@ def krea2_state_dict(features=6144, layers=28):
     for block in range(layers):
         state[f"diffusion_model.blocks.{block}.attn.wq.weight"] = FakeTensor((features, features))
     return state
+
+
+def minimax_h3_state_dict(layers=50, token_refiner_layers=2):
+    state = {
+        "diffusion_model.video_patch_proj.weight": FakeTensor((5376, 96)),
+        "diffusion_model.audio_patch_proj.weight": FakeTensor((5376, 32)),
+        "diffusion_model.condition_proj.weight": FakeTensor((5376, 5120)),
+        "diffusion_model.final_layer.video_out.weight": FakeTensor((96, 5376)),
+        "diffusion_model.final_layer.video_out.bias": FakeTensor((96,)),
+        "diffusion_model.final_layer.audio_out.weight": FakeTensor((32, 5376)),
+        "diffusion_model.final_layer.audio_out.bias": FakeTensor((32,)),
+        "diffusion_model.final_layer.adaln_proj.linear.weight": FakeTensor((10752, 8)),
+        "diffusion_model.final_layer.adaln_proj.linear.bias": FakeTensor((10752,)),
+        "diffusion_model.final_layer.norm.weight": FakeTensor((5376,)),
+        "diffusion_model.adaln_t_table": FakeTensor((1025, 8)),
+        "diffusion_model.rope.inv_freq": FakeTensor((16,)),
+        "diffusion_model.video_patch_proj.bias": FakeTensor((5376,)),
+        "diffusion_model.audio_patch_proj.bias": FakeTensor((5376,)),
+        "diffusion_model.condition_proj.bias": FakeTensor((5376,)),
+        "diffusion_model.token_refiner.final_norm.weight": FakeTensor((5376,)),
+    }
+    for block in range(layers):
+        state[f"diffusion_model.blocks.{block}.adaln_proj.linear.weight"] = FakeTensor(
+            (96768, 8)
+        )
+        state[f"diffusion_model.blocks.{block}.adaln_proj.linear.bias"] = FakeTensor(
+            (96768,)
+        )
+        state[f"diffusion_model.blocks.{block}.attn.q_norm.weight"] = FakeTensor((128,))
+        state[f"diffusion_model.blocks.{block}.attn.k_norm.weight"] = FakeTensor((128,))
+        state[f"diffusion_model.blocks.{block}.norm1.weight"] = FakeTensor((5376,))
+        state[f"diffusion_model.blocks.{block}.norm2.weight"] = FakeTensor((5376,))
+        state[f"diffusion_model.blocks.{block}.attn.qkv_proj.weight"] = FakeTensor(
+            (21504, 5376)
+        )
+        state[f"diffusion_model.blocks.{block}.attn.out_proj.weight"] = FakeTensor(
+            (5376, 7168)
+        )
+        state[f"diffusion_model.blocks.{block}.mlp.fc1.weight"] = FakeTensor(
+            (28672, 5376)
+        )
+        state[f"diffusion_model.blocks.{block}.mlp.fc2.weight"] = FakeTensor(
+            (5376, 14336)
+        )
+    for block in range(token_refiner_layers):
+        state[f"diffusion_model.token_refiner.blocks.{block}.attn.q_norm.weight"] = FakeTensor(
+            (128,)
+        )
+        state[f"diffusion_model.token_refiner.blocks.{block}.attn.k_norm.weight"] = FakeTensor(
+            (128,)
+        )
+        state[f"diffusion_model.token_refiner.blocks.{block}.norm1.weight"] = FakeTensor(
+            (5376,)
+        )
+        state[f"diffusion_model.token_refiner.blocks.{block}.norm2.weight"] = FakeTensor(
+            (5376,)
+        )
+        state[f"diffusion_model.token_refiner.blocks.{block}.attn.qkv_proj.weight"] = FakeTensor(
+            (21504, 5376)
+        )
+        state[f"diffusion_model.token_refiner.blocks.{block}.attn.out_proj.weight"] = FakeTensor(
+            (5376, 7168)
+        )
+        state[f"diffusion_model.token_refiner.blocks.{block}.mlp.fc1.weight"] = FakeTensor(
+            (28672, 5376)
+        )
+        state[f"diffusion_model.token_refiner.blocks.{block}.mlp.fc2.weight"] = FakeTensor(
+            (5376, 14336)
+        )
+    return state
+
+
+MINIMAX_H3_EFFECTIVE_CONFIG = {
+    "image_model": "minimax_h3",
+    "num_layers": 50,
+    "token_refiner_num_layers": 2,
+    "hidden_size": 5376,
+    "latents_dim": 24,
+    "audio_latents_dim": 32,
+    "attention_head_dim": 128,
+    "num_attention_heads": 56,
+    "ffn_hidden_size": 14336,
+    "text_dim": 5120,
+    "adaln_curve_grid": 1025,
+    "time_embed_dim": 8,
+    "rope_inv_freq_len": 16,
+}
 
 
 class FakeModel:
@@ -83,12 +171,21 @@ class FakeModel:
         self.model_options = patcher_state.pop(
             "model_options", {"transformer_options": {}}
         )
+        self.model = patcher_state.pop("base_model", None)
         assert not patcher_state
         self.filter_prefix = None
 
     def model_state_dict(self, filter_prefix=None):
         self.filter_prefix = filter_prefix
         return {key: value for key, value in self.state.items() if key.startswith(filter_prefix or "")}
+
+
+def minimax_h3_model(*, state=None, config=None):
+    unet_config = dict(MINIMAX_H3_EFFECTIVE_CONFIG if config is None else config)
+    unet_config.setdefault("dtype", "torch.bfloat16")
+    model_config = types.SimpleNamespace(unet_config=unet_config)
+    base_model = types.SimpleNamespace(model_config=model_config)
+    return FakeModel(state=state or minimax_h3_state_dict(), base_model=base_model)
 
 
 def test_extract_normalizes_diffusion_prefix():
@@ -190,6 +287,53 @@ def test_extract_krea2_rejects_wrong_width_and_missing_blocks():
 def test_extract_krea2_rejects_anima_model():
     with pytest.raises(service.QuantizationNodeError, match="Krea2|txtfusion.projector"):
         service.extract_krea2_state_dict(FakeModel(state=anima_state_dict()))
+
+
+def test_extract_minimax_h3_preserves_native_namespace_and_exact_effective_config():
+    model = minimax_h3_model()
+    result = service.extract_minimax_h3_state_dict(model)
+
+    assert model.filter_prefix == "diffusion_model."
+    assert "video_patch_proj.weight" in result
+    assert "blocks.49.mlp.fc2.weight" in result
+    assert all(not key.startswith(("diffusion_model.", "net.")) for key in result)
+
+
+def test_extract_minimax_h3_rejects_non_reference_curve_or_effective_config():
+    time_embedder = minimax_h3_state_dict()
+    del time_embedder["diffusion_model.adaln_t_table"]
+    time_embedder["diffusion_model.time_embedder.proj_in.weight"] = FakeTensor((256, 256))
+    with pytest.raises(service.QuantizationNodeError, match="adaln_t_table|curve"):
+        service.extract_minimax_h3_state_dict(minimax_h3_model(state=time_embedder))
+
+    changed_config = dict(MINIMAX_H3_EFFECTIVE_CONFIG, num_layers=49)
+    with pytest.raises(service.QuantizationNodeError, match="effective config|num_layers"):
+        service.extract_minimax_h3_state_dict(minimax_h3_model(config=changed_config))
+
+    metadata_override = dict(MINIMAX_H3_EFFECTIVE_CONFIG, patch_size=(1, 2, 2))
+    with pytest.raises(service.QuantizationNodeError, match="unexpected transformer config"):
+        service.extract_minimax_h3_state_dict(minimax_h3_model(config=metadata_override))
+
+    unsupported_dtype = dict(MINIMAX_H3_EFFECTIVE_CONFIG, dtype="torch.float16")
+    with pytest.raises(service.QuantizationNodeError, match="bfloat16 or torch.float32"):
+        service.extract_minimax_h3_state_dict(minimax_h3_model(config=unsupported_dtype))
+
+
+def test_extract_minimax_h3_rejects_missing_model_config_and_quantized_input():
+    with pytest.raises(service.QuantizationNodeError, match="effective config"):
+        service.extract_minimax_h3_state_dict(FakeModel(state=minimax_h3_state_dict()))
+
+    missing_dtype = minimax_h3_model()
+    del missing_dtype.model.model_config.unet_config["dtype"]
+    with pytest.raises(service.QuantizationNodeError, match="bfloat16 or torch.float32"):
+        service.extract_minimax_h3_state_dict(missing_dtype)
+
+    quantized = minimax_h3_state_dict()
+    quantized["diffusion_model.blocks.0.attn.qkv_proj.comfy_quant"] = FakeTensor(
+        (80,), "torch.uint8"
+    )
+    with pytest.raises(service.QuantizationNodeError, match="already quantized"):
+        service.extract_minimax_h3_state_dict(minimax_h3_model(state=quantized))
 
 
 def test_resolve_output_uses_output_diffusion_models_root_and_strips_extension(tmp_path):
@@ -331,6 +475,145 @@ def test_krea2_export_uses_shared_publication_with_krea2_metadata(tmp_path):
         "source": "comfyui_model_state_dict",
     }
     assert report["quantized_tensor_count"] == 224
+
+
+def test_minimax_h3_export_uses_reference_preset_and_shared_publication(tmp_path):
+    paths = service.resolve_output_paths(
+        tmp_path / "output" / "diffusion_models",
+        "minimax_h3_int8",
+    )
+    captured = {}
+
+    def exporter(**kwargs):
+        captured.update(kwargs)
+        Path(kwargs["output_checkpoint"]).write_bytes(b"minimax h3 checkpoint")
+        return {
+            "status": "model_written",
+            "quantized_tensor_count": 200,
+            "rotated_tensor_count": 200,
+            "copied_tensor_count": 332,
+            "written_files": [],
+        }
+
+    report, report_path = service.export_minimax_h3_int8_convrot(
+        state_dict={"video_patch_proj.weight": FakeTensor((5376, 96))},
+        paths=paths,
+        device="cpu",
+        overwrite=False,
+        write_report=True,
+        hash_output=False,
+        exporter=exporter,
+    )
+
+    assert paths.checkpoint.read_bytes() == b"minimax h3 checkpoint"
+    assert Path(report_path).is_file()
+    assert captured["family"] == "minimax_h3"
+    assert captured["quantization_preset"] == "strict_reference"
+    assert captured["convrot"] is True
+    assert captured["convrot_groupsize"] == 256
+    assert captured["validate_source_dtype"] is True
+    assert captured["metadata"] == {
+        "model_family": "minimax_h3",
+        "project": "minimax-h3-int8-convrot",
+        "source": "comfyui_model_state_dict",
+    }
+    assert report["quantized_tensor_count"] == 200
+    assert report["estimated_peak_memory_bytes"] > 0
+    assert report["required_additional_memory_bytes"] > 0
+    written_report = json.loads(Path(report_path).read_text(encoding="utf-8"))
+    assert written_report["estimated_peak_memory_bytes"] == report[
+        "estimated_peak_memory_bytes"
+    ]
+
+
+def test_minimax_h3_export_rejects_incomplete_keep_report(tmp_path):
+    paths = service.resolve_output_paths(
+        tmp_path / "output" / "diffusion_models",
+        "minimax_h3_incomplete",
+    )
+
+    def exporter(**kwargs):
+        Path(kwargs["output_checkpoint"]).write_bytes(b"incomplete")
+        return {
+            "status": "model_written",
+            "quantized_tensor_count": 200,
+            "rotated_tensor_count": 200,
+            "copied_tensor_count": 331,
+            "written_files": [],
+        }
+
+    with pytest.raises(service.QuantizationNodeError, match="expected_copied=332"):
+        service.export_minimax_h3_int8_convrot(
+            state_dict={"video_patch_proj.weight": FakeTensor((5376, 96))},
+            paths=paths,
+            device="cpu",
+            overwrite=False,
+            write_report=False,
+            hash_output=False,
+            exporter=exporter,
+        )
+    assert not paths.checkpoint.exists()
+
+
+def test_minimax_h3_memory_estimate_and_available_memory_boundary(monkeypatch):
+    state = {
+        "blocks.0.attn.qkv_proj.weight": FakeTensor(
+            (4, 256), "torch.bfloat16", element_bytes=2
+        ),
+        "token_refiner.final_norm.weight": FakeTensor((4,), element_bytes=4),
+    }
+    estimate = service.estimate_minimax_h3_memory(state)
+
+    assert estimate.source_bytes == 2064
+    assert estimate.retained_output_bytes == 1128
+    assert estimate.workspace_bytes == 4096
+    assert estimate.estimated_peak_bytes == 8746
+    assert estimate.required_additional_bytes == 6269
+
+    monkeypatch.setattr(service, "_available_memory_bytes", lambda: 6268)
+    with pytest.raises(service.QuantizationNodeError, match="Insufficient.*memory"):
+        service._preflight_minimax_h3_memory(state)
+
+    monkeypatch.setattr(service, "_available_memory_bytes", lambda: 6269)
+    checked, available = service._preflight_minimax_h3_memory(state)
+    assert checked == estimate
+    assert available == 6269
+
+
+def test_minimax_h3_service_export_rejects_fp16_selected_tensor(
+    tmp_path, monkeypatch
+):
+    torch = pytest.importorskip("torch")
+    export_module = sys.modules[
+        service.export_minimax_h3_int8_convrot_from_state_dict.__module__
+    ]
+    spec = export_module.TensorSpec(
+        name="blocks.0.attn.qkv_proj.weight",
+        shape=(4, 256),
+    )
+    monkeypatch.setattr(
+        export_module,
+        "validate_minimax_h3_state_dict",
+        lambda *_args, **_kwargs: (spec,),
+    )
+    monkeypatch.setattr(service, "_available_memory_bytes", lambda: 1_000_000)
+    paths = service.resolve_output_paths(
+        tmp_path / "output" / "diffusion_models",
+        "minimax_h3_fp16",
+    )
+
+    with pytest.raises(service.QuantizationNodeError, match="bfloat16 or float32"):
+        service.export_minimax_h3_int8_convrot(
+            state_dict={
+                spec.name: torch.zeros(spec.shape, dtype=torch.float16),
+            },
+            paths=paths,
+            device="cpu",
+            overwrite=False,
+            write_report=False,
+            hash_output=False,
+        )
+    assert not paths.checkpoint.exists()
 
 
 def test_export_rejects_unknown_quantization_preset(tmp_path):

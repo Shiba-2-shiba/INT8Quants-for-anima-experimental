@@ -1,7 +1,7 @@
 [project]
 name = "anima-int8-convrot"
 version = "0.1.0"
-description = "Self-contained Anima 2B and Krea2 INT8 ConvRot export nodes for ComfyUI"
+description = "Self-contained Anima 2B, Krea2, and MiniMax H3 INT8 ConvRot export nodes for ComfyUI"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
 dependencies = ["safetensors>=0.4.0"]
@@ -20,8 +20,8 @@ Documentation = "https://github.com/Shiba-2-shiba/INT8Quants-for-anima-experimen
 
 [tool.comfy]
 PublisherId = "Shiba-2-shiba"
-DisplayName = "Anima & Krea2 INT8 ConvRot"
-requires-comfyui = ">=0.27.0"
+DisplayName = "Anima, Krea2 & MiniMax H3 INT8 ConvRot"
+requires-comfyui = ">=0.31.0"
 
 [tool.pytest.ini_options]
 addopts = "--import-mode=importlib"

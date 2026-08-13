@@ -13,17 +13,22 @@ from comfy_api.v0_0_2 import ComfyExtension, io
 
 from .service import (
     DEFAULT_KREA2_PRESET,
+    DEFAULT_MINIMAX_H3_PRESET,
     DEFAULT_QUANTIZATION_PRESET,
     KREA2_PRESETS,
+    MINIMAX_H3_PRESETS,
     QUANTIZATION_PRESETS,
     OutputPaths,
     estimate_state_dict_bytes,
     expected_krea2_quantized_tensors,
+    expected_minimax_h3_quantized_tensors,
     expected_quantized_tensors,
     export_anima_int8_convrot,
     export_krea2_int8_convrot,
+    export_minimax_h3_int8_convrot,
     extract_anima_state_dict,
     extract_krea2_state_dict,
+    extract_minimax_h3_state_dict,
     resolve_output_paths,
 )
 
@@ -81,6 +86,36 @@ _KREA2_PROFILE = _NodeProfile(
         "embedders, text fusion, modulation, normalization, and final layers in source precision."
     ),
     search_aliases=("krea2", "krea 2", "int8", "convrot", "comfy quants", "quantize"),
+)
+
+_MINIMAX_H3_PROFILE = _NodeProfile(
+    node_id="ComfyQuantsMiniMaxH3Int8ConvRotSave",
+    display_name="MiniMax H3 INT8 ConvRot Save",
+    model_name="MiniMax H3",
+    model_tooltip=(
+        "Unpatched official curve-form MiniMax H3 MODEL from Load Diffusion Model."
+    ),
+    description=(
+        "Quantize the 200 main-DiT matrices of the official curve-form MiniMax H3 MODEL "
+        "to stock ComfyUI INT8 ConvRot while preserving patch, condition, token-refiner, "
+        "AdaLN, norm, bias, RoPE, and final layers in source precision."
+    ),
+    filename_prefix="minimax_h3_int8/minimax_h3_fl2va_pruned_int8_convrot",
+    presets=tuple(MINIMAX_H3_PRESETS),
+    default_preset=DEFAULT_MINIMAX_H3_PRESET,
+    preset_tooltip=(
+        "strict_reference: match the official 200-tensor INT8 selection; all remaining "
+        "MiniMax H3 tensors are kept in source precision. ConvRot group size is fixed at 256."
+    ),
+    search_aliases=(
+        "minimax h3",
+        "minimax",
+        "h3",
+        "int8",
+        "convrot",
+        "comfy quants",
+        "quantize",
+    ),
 )
 
 
@@ -223,6 +258,13 @@ def _execute_export(
         "execution_device": report.get("execution_device"),
         "output_hash": report.get("output_hash", ""),
     }
+    for memory_key in (
+        "estimated_peak_memory_bytes",
+        "required_additional_memory_bytes",
+        "available_memory_bytes_at_preflight",
+    ):
+        if memory_key in report:
+            summary_data[memory_key] = report[memory_key]
     summary = json.dumps(summary_data, ensure_ascii=False, sort_keys=True)
     LOGGER.info("Completed %s INT8 ConvRot export: %s", profile.model_name, summary)
     return io.NodeOutput(str(paths.checkpoint), report_path, summary)
@@ -294,11 +336,45 @@ class ComfyQuantsKrea2Int8ConvRotSave(io.ComfyNode):
         )
 
 
+class ComfyQuantsMiniMaxH3Int8ConvRotSave(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return _define_schema(_MINIMAX_H3_PROFILE)
+
+    @classmethod
+    def execute(
+        cls,
+        *,
+        model: Any,
+        filename_prefix: str,
+        quantization_preset: str = DEFAULT_MINIMAX_H3_PRESET,
+        device: str,
+        overwrite: bool,
+        write_report: bool,
+        hash_output: bool,
+    ) -> io.NodeOutput:
+        return _execute_export(
+            cls,
+            _MINIMAX_H3_PROFILE,
+            model=model,
+            filename_prefix=filename_prefix,
+            quantization_preset=quantization_preset,
+            device=device,
+            overwrite=overwrite,
+            write_report=write_report,
+            hash_output=hash_output,
+            extract_state_dict=extract_minimax_h3_state_dict,
+            expected_count_for_preset=expected_minimax_h3_quantized_tensors,
+            export_checkpoint=export_minimax_h3_int8_convrot,
+        )
+
+
 class ComfyQuantsExtension(ComfyExtension):
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         return [
             ComfyQuantsAnimaInt8ConvRotSave,
             ComfyQuantsKrea2Int8ConvRotSave,
+            ComfyQuantsMiniMaxH3Int8ConvRotSave,
         ]
 
 

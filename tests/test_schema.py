@@ -38,14 +38,16 @@ def test_v3_schema_and_registration():
     package = load_package()
     extension = asyncio.run(package.comfy_entrypoint())
     nodes = asyncio.run(extension.get_node_list())
-    assert len(nodes) == 2
+    assert len(nodes) == 3
     nodes_by_id = {node.define_schema().node_id: node for node in nodes}
     assert set(nodes_by_id) == {
         "ComfyQuantsAnimaInt8ConvRotSave",
         "ComfyQuantsKrea2Int8ConvRotSave",
+        "ComfyQuantsMiniMaxH3Int8ConvRotSave",
     }
     anima_node = nodes_by_id["ComfyQuantsAnimaInt8ConvRotSave"]
     krea2_node = nodes_by_id["ComfyQuantsKrea2Int8ConvRotSave"]
+    minimax_h3_node = nodes_by_id["ComfyQuantsMiniMaxH3Int8ConvRotSave"]
     node_module = sys.modules[anima_node.__module__]
     output_models_root = str(
         (Path(node_module.folder_paths.get_output_directory()) / "diffusion_models").resolve(
@@ -96,6 +98,23 @@ def test_v3_schema_and_registration():
     assert krea2_info.category == "Comfy Quants/quantization"
     assert krea2_info.output_node is True
     assert krea2_info.search_aliases == ["krea2", "krea 2", "int8", "convrot", "comfy quants", "quantize"]
+
+    minimax_h3_schema = minimax_h3_node.define_schema()
+    assert minimax_h3_schema.node_id == "ComfyQuantsMiniMaxH3Int8ConvRotSave"
+    assert minimax_h3_schema.display_name == "MiniMax H3 INT8 ConvRot Save"
+    minimax_h3_prefix = next(
+        item for item in minimax_h3_schema.inputs if item.id == "filename_prefix"
+    )
+    assert minimax_h3_prefix.default.startswith("minimax_h3_int8/")
+    minimax_h3_preset = next(
+        item for item in minimax_h3_schema.inputs if item.id == "quantization_preset"
+    )
+    assert minimax_h3_preset.options == ["strict_reference"]
+    assert minimax_h3_preset.default == "strict_reference"
+    minimax_h3_schema.validate()
+    minimax_h3_info = minimax_h3_schema.get_v1_info(minimax_h3_node)
+    assert minimax_h3_info.output_node is True
+    assert "minimax h3" in minimax_h3_info.search_aliases
 
 
 def test_execute_reports_progress_and_returns_stable_summary(tmp_path, monkeypatch):
@@ -254,6 +273,80 @@ def test_krea2_execute_uses_krea2_contract_and_default_prefix(tmp_path, monkeypa
     assert captured["export"]["quantization_preset"] == "quality_keep"
 
 
+def test_minimax_h3_execute_uses_reference_contract_and_family_folder(tmp_path, monkeypatch):
+    if importlib.util.find_spec("folder_paths") is None:
+        pytest.skip("ComfyUI checkout is required for the Backend V3 integration test")
+    package = load_package()
+    extension = asyncio.run(package.comfy_entrypoint())
+    nodes = asyncio.run(extension.get_node_list())
+    node_class = next(
+        node for node in nodes
+        if node.define_schema().node_id == "ComfyQuantsMiniMaxH3Int8ConvRotSave"
+    )
+    node_module = sys.modules[node_class.__module__]
+    node_class.hidden = types.SimpleNamespace(unique_id="minimax-h3-node")
+    output_directory = tmp_path / "output"
+    default_prefix = "minimax_h3_int8/minimax_h3_fl2va_pruned_int8_convrot"
+    output_paths = node_module.resolve_output_paths(
+        output_directory / "diffusion_models", default_prefix
+    )
+    captured = {}
+
+    class FakeProgressBar:
+        def __init__(self, total, node_id=None):
+            captured["progress"] = (total, node_id)
+
+        def update_absolute(self, current, total):
+            captured["last_progress"] = (current, total)
+
+    monkeypatch.setattr(node_module, "ProgressBar", FakeProgressBar)
+    monkeypatch.setattr(
+        node_module.folder_paths, "get_output_directory", lambda: str(output_directory)
+    )
+    monkeypatch.setattr(node_module.folder_paths, "add_model_folder_path", lambda *_args: None)
+    monkeypatch.setattr(node_module, "extract_minimax_h3_state_dict", lambda _model: {"x": object()})
+    monkeypatch.setattr(node_module, "estimate_state_dict_bytes", lambda _state: 123)
+    monkeypatch.setattr(node_module, "expected_minimax_h3_quantized_tensors", lambda _preset: 200)
+
+    def fake_export(**kwargs):
+        captured["export"] = kwargs
+        return (
+            {
+                "status": "model_written",
+                "quantized_tensor_count": 200,
+                "rotated_tensor_count": 200,
+                "copied_tensor_count": 332,
+                "output_bytes": 20_970_379_616,
+                "execution_device": "cpu",
+                "estimated_peak_memory_bytes": 74_175_018_087,
+                "required_additional_memory_bytes": 25_904_216_256,
+                "available_memory_bytes_at_preflight": 40_000_000_000,
+            },
+            "",
+        )
+
+    monkeypatch.setattr(node_module, "export_minimax_h3_int8_convrot", fake_export)
+    result = node_class.execute(
+        model=object(),
+        filename_prefix=default_prefix,
+        device="cpu",
+        overwrite=False,
+        write_report=False,
+        hash_output=False,
+    )
+
+    checkpoint, report, summary_text = result.result
+    assert checkpoint == str(output_paths.checkpoint)
+    assert report == ""
+    summary = json.loads(summary_text)
+    assert summary["quantized_tensor_count"] == 200
+    assert summary["estimated_peak_memory_bytes"] == 74_175_018_087
+    assert summary["required_additional_memory_bytes"] == 25_904_216_256
+    assert captured["progress"] == (200, "minimax-h3-node")
+    assert captured["last_progress"] == (200, 200)
+    assert captured["export"]["quantization_preset"] == "strict_reference"
+
+
 def test_stock_comfyui_detects_the_exported_krea2_namespace_and_quant_markers():
     comfy_spec = importlib.util.find_spec("comfy")
     if comfy_spec is None or not comfy_spec.submodule_search_locations:
@@ -319,5 +412,79 @@ def test_stock_comfyui_detects_the_exported_krea2_namespace_and_quant_markers():
         "kvheads": 12,
         "txtlayers": 12,
         "txtdim": 2560,
+    }
+    assert quantization["detect_layer_quantization"](state, "") == {"mixed_ops": True}
+
+
+def test_stock_comfyui_detects_minimax_h3_reference_namespace_and_quant_markers():
+    comfy_spec = importlib.util.find_spec("comfy")
+    if comfy_spec is None or not comfy_spec.submodule_search_locations:
+        pytest.skip("ComfyUI checkout is required for stock loader contract validation")
+
+    import ast
+    import logging
+    import math
+
+    comfy_root = Path(next(iter(comfy_spec.submodule_search_locations)))
+
+    def load_functions(path, names, namespace):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        selected = [
+            node
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in names
+        ]
+        assert {node.name for node in selected} == set(names)
+        module = ast.fix_missing_locations(ast.Module(body=selected, type_ignores=[]))
+        exec(compile(module, str(path), "exec"), namespace)
+        return namespace
+
+    detection = load_functions(
+        comfy_root / "model_detection.py",
+        {"any_suffix_in", "calculate_transformer_depth", "count_blocks", "detect_unet_config"},
+        {"math": math},
+    )
+    quantization = load_functions(
+        comfy_root / "utils.py",
+        {"detect_layer_quantization"},
+        {"logging": logging},
+    )
+
+    class ShapeOnlyTensor:
+        def __init__(self, shape):
+            self.shape = tuple(shape)
+
+    state = {
+        "video_patch_proj.weight": ShapeOnlyTensor((5376, 96)),
+        "audio_patch_proj.weight": ShapeOnlyTensor((5376, 32)),
+        "condition_proj.weight": ShapeOnlyTensor((5376, 5120)),
+        "final_layer.video_out.weight": ShapeOnlyTensor((96, 5376)),
+        "final_layer.audio_out.weight": ShapeOnlyTensor((32, 5376)),
+        "adaln_t_table": ShapeOnlyTensor((1025, 8)),
+        "rope.inv_freq": ShapeOnlyTensor((16,)),
+        "blocks.0.attn.q_norm.weight": ShapeOnlyTensor((128,)),
+        "blocks.0.attn.qkv_proj.weight": ShapeOnlyTensor((21504, 5376)),
+        "blocks.0.mlp.fc1.weight": ShapeOnlyTensor((28672, 5376)),
+        "blocks.0.attn.qkv_proj.comfy_quant": ShapeOnlyTensor((80,)),
+        "token_refiner.blocks.0.attn.qkv_proj.weight": ShapeOnlyTensor((21504, 5376)),
+    }
+    for block in range(1, 50):
+        state[f"blocks.{block}.attn.qkv_proj.weight"] = ShapeOnlyTensor((21504, 5376))
+    state["token_refiner.blocks.1.attn.qkv_proj.weight"] = ShapeOnlyTensor((21504, 5376))
+
+    assert detection["detect_unet_config"](state, "") == {
+        "image_model": "minimax_h3",
+        "num_layers": 50,
+        "token_refiner_num_layers": 2,
+        "hidden_size": 5376,
+        "latents_dim": 24,
+        "audio_latents_dim": 32,
+        "attention_head_dim": 128,
+        "num_attention_heads": 56,
+        "ffn_hidden_size": 14336,
+        "text_dim": 5120,
+        "adaln_curve_grid": 1025,
+        "time_embed_dim": 8,
+        "rope_inv_freq_len": 16,
     }
     assert quantization["detect_layer_quantization"](state, "") == {"mixed_ops": True}

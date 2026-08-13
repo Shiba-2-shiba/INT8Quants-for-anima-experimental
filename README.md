@@ -1,10 +1,10 @@
-# Anima & Krea2 INT8 ConvRot for ComfyUI
+# Anima, Krea2 & MiniMax H3 INT8 ConvRot for ComfyUI
 
-Self-contained ComfyUI Backend V3 output nodes that export unpatched Anima 2B
-and Krea2 Raw/Turbo `MODEL` inputs as stock ComfyUI `int8_tensorwise`
-checkpoints with Regular ConvRot group size 256.
+Self-contained ComfyUI Backend V3 output nodes that export unpatched Anima 2B,
+Krea2 Raw/Turbo, and MiniMax H3 `MODEL` inputs as stock ComfyUI
+`int8_tensorwise` checkpoints with Regular ConvRot group size 256.
 
-The custom node contains only the two model contracts and the INT8 export code
+The custom node contains only the three model contracts and the INT8 export code
 they share. It does not require a `third_party` checkout, Git submodule,
 external `comfy-quants` or `convert_to_quant` package, or runtime `sys.path`
 modification.
@@ -15,6 +15,7 @@ modification.
 | --- | ---: | --- |
 | Anima INT8 ConvRot Save | 426 or 448 | Preset-dependent; embedders, final layer, LLM adapter, and norms remain unchanged |
 | Krea2 INT8 ConvRot Save | 224 | `first`, `tmlp`, `txtmlp`, `txtfusion`, `last`, `tproj`, modulation, and norms remain unchanged |
+| MiniMax H3 INT8 ConvRot Save | 200 | Token refiner, conditioning/input/output projections, AdaLN, biases, norms, and buffers remain unchanged |
 
 Krea2 is a separate node so the existing
 `ComfyQuantsAnimaInt8ConvRotSave` node ID and saved workflows remain compatible.
@@ -22,13 +23,13 @@ No frontend JavaScript or tab patching is needed.
 
 ## Requirements
 
-- ComfyUI 0.27.0 or newer with Backend V3 and native INT8 ConvRot support
+- ComfyUI 0.31.0 or newer with Backend V3, MiniMax H3, and native INT8 ConvRot support
 - Python 3.10 or newer
-- An original floating-point Anima 2B, Krea2 Raw, or Krea2 Turbo diffusion model
+- An original floating-point Anima 2B, Krea2 Raw/Turbo, or supported MiniMax H3 diffusion model
 - `safetensors` (installed from this repository's `requirements.txt`)
 
 ComfyUI supplies PyTorch and the runtime INT8 loader. The current local
-validation checkout is ComfyUI 0.28.0 with `comfy-kitchen==0.2.20`.
+validation checkout is ComfyUI `v0.32.0-6-g725e6ec6`.
 
 Krea2 here means the local open-weight Krea2 Raw/Turbo model. It is not
 FLUX.1 Krea [dev], and it is not the hosted Krea API's Medium/Large model
@@ -53,6 +54,7 @@ required.
 ```text
 Load Diffusion Model -> Anima INT8 ConvRot Save
 Load Diffusion Model -> Krea2 INT8 ConvRot Save
+Load Diffusion Model -> MiniMax H3 INT8 ConvRot Save
 ```
 
 The checkpoint and optional JSON report are written together below ComfyUI's
@@ -88,12 +90,24 @@ The Krea2 selection follows the high-precision boundary used by the local
 and exact shapes instead of short substring filters. See
 [`docs/krea2.md`](docs/krea2.md) for model and format details.
 
+MiniMax H3:
+
+- `strict_reference` (default): supports the official 50-block, two-token-
+  refiner, curve-form architecture and quantizes only qkv/out/fc1/fc2 in each
+  main DiT block, for 200 INT8 matrices. See
+  [`docs/minimax_h3.md`](docs/minimax_h3.md) for the exact contract and the
+  current high-memory validation limitation.
+
 ## Safety checks
 
-Both nodes reject patched ModelPatchers, already-quantized inputs, invalid
+All nodes reject patched ModelPatchers, already-quantized inputs, invalid
 model signatures, missing blocks, invalid tensor shapes/dtypes, non-finite
 selected weights, unsafe output paths, and insufficient free disk space.
 Checkpoint/report publication uses temporary files and rollback.
+
+MiniMax H3 additionally performs a conservative available-RAM preflight. The
+provisional recommendation is 96 GB system RAM for the official BF16 layout
+and 160 GB for a fully FP32 source; see [`docs/minimax_h3.md`](docs/minimax_h3.md).
 
 `cuda` is also the PyTorch device name on ROCm builds. Successful offline
 export does not by itself guarantee that an optimized runtime INT8 kernel is
@@ -107,7 +121,8 @@ Run host-independent tests:
 python -m pytest -q
 ```
 
-Run Backend V3 and stock Krea2 detection integration against a ComfyUI checkout:
+Run Backend V3 plus stock Krea2/MiniMax H3 detection integration against a
+ComfyUI checkout:
 
 ```powershell
 $env:PYTHONPATH='C:\path\to\ComfyUI'
