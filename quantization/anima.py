@@ -1,7 +1,7 @@
 # Copyright Comfy Quants Project contributors
 # SPDX-License-Identifier: GPL-3.0-only
 # Modified for this custom node on 2026-07-14 and 2026-07-15.
-"""Self-contained Anima 2B tensor contract for INT8 ConvRot export.
+"""Self-contained Anima 2B / 2.9B tensor contracts for INT8 ConvRot export.
 
 Derived from ``Comfy-Org/comfy-quants`` at commit
 ``1e0d481f24847c4914578f5468917902ad53ea46``.  The source declarations lived in
@@ -32,6 +32,7 @@ class AnimaTensorSpec(TensorSpec):
 
 ANIMA_MODEL_CHANNELS: Final = 2048
 ANIMA_BLOCK_COUNT: Final = 28
+ANIMA_SUPPORTED_BLOCK_COUNTS: Final = (ANIMA_BLOCK_COUNT, 40)
 ANIMA_NUM_HEADS: Final = 16
 ANIMA_HEAD_DIM: Final = 128
 ANIMA_CONTEXT_DIM: Final = 1024
@@ -103,9 +104,19 @@ def _validate_preset(quantization_preset: str) -> str:
     return quantization_preset
 
 
-def _build_tensor_specs(quantization_preset: str) -> tuple[AnimaTensorSpec, ...]:
+def _validate_block_count(block_count: int) -> int:
+    if block_count not in ANIMA_SUPPORTED_BLOCK_COUNTS:
+        raise AnimaContractError(
+            f"unsupported Anima block count {block_count!r}; expected 28 (2B) or 40 (2.9B)."
+        )
+    return block_count
+
+
+def _build_tensor_specs(
+    quantization_preset: str, block_count: int,
+) -> tuple[AnimaTensorSpec, ...]:
     specs: list[AnimaTensorSpec] = []
-    for block in range(ANIMA_BLOCK_COUNT):
+    for block in range(block_count):
         for suffix, shape in _BLOCK_WEIGHT_SHAPES:
             if quantization_preset == DEFAULT_ANIMA_QUANTIZATION_PRESET:
                 if block == 0 or (block == 1 and suffix.startswith(_ADALN_PREFIX)):
@@ -121,7 +132,8 @@ def _build_tensor_specs(quantization_preset: str) -> tuple[AnimaTensorSpec, ...]
 
 _TENSOR_SPECS = MappingProxyType(
     {
-        preset: _build_tensor_specs(preset)
+        (block_count, preset): _build_tensor_specs(preset, block_count)
+        for block_count in ANIMA_SUPPORTED_BLOCK_COUNTS
         for preset in ANIMA_QUANTIZATION_PRESETS
     }
 )
@@ -129,24 +141,31 @@ _TENSOR_SPECS = MappingProxyType(
 
 def expected_quantized_tensors(
     quantization_preset: str = DEFAULT_ANIMA_QUANTIZATION_PRESET,
+    *,
+    block_count: int = ANIMA_BLOCK_COUNT,
 ) -> int:
-    """Return the fixed selected tensor count for an Anima preset."""
+    """Return the selected count, retaining the 2B default for existing callers."""
 
     preset = _validate_preset(quantization_preset)
-    return EXPECTED_QUANTIZED_TENSORS[preset]
+    _validate_block_count(block_count)
+    return EXPECTED_QUANTIZED_TENSORS[preset] + (
+        block_count - ANIMA_BLOCK_COUNT
+    ) * len(_BLOCK_WEIGHT_SHAPES)
 
 
 def get_anima_tensor_specs(
     quantization_preset: str = DEFAULT_ANIMA_QUANTIZATION_PRESET,
+    *,
+    block_count: int = ANIMA_BLOCK_COUNT,
 ) -> tuple[AnimaTensorSpec, ...]:
     """Return selected Anima weights in deterministic checkpoint order."""
 
     preset = _validate_preset(quantization_preset)
-    specs = _TENSOR_SPECS[preset]
-    expected = EXPECTED_QUANTIZED_TENSORS[preset]
+    expected = expected_quantized_tensors(preset, block_count=block_count)
+    specs = _TENSOR_SPECS[block_count, preset]
     if len(specs) != expected:  # defensive guard against contract edits
         raise AnimaContractError(
-            f"Anima 2B INT8 {preset} selection contract changed: "
+            f"Anima {block_count}-block INT8 {preset} selection contract changed: "
             f"expected {expected}, got {len(specs)}."
         )
     return specs
@@ -154,10 +173,16 @@ def get_anima_tensor_specs(
 
 def get_anima_tensor_names(
     quantization_preset: str = DEFAULT_ANIMA_QUANTIZATION_PRESET,
+    *,
+    block_count: int = ANIMA_BLOCK_COUNT,
 ) -> tuple[str, ...]:
     """Return only the selected checkpoint keys for an Anima preset."""
 
-    return tuple(spec.name for spec in get_anima_tensor_specs(quantization_preset))
+    return tuple(
+        spec.name for spec in get_anima_tensor_specs(
+            quantization_preset, block_count=block_count,
+        )
+    )
 
 
 def _tensor_shape(tensor: Any, *, name: str) -> tuple[int, ...]:
@@ -178,16 +203,16 @@ def validate_anima_state_dict(
     preset: str = DEFAULT_ANIMA_QUANTIZATION_PRESET,
     require_selected_tensors: bool = True,
 ) -> tuple[AnimaTensorSpec, ...]:
-    """Validate the stock ``net.*`` Anima 2B signature and selected weights.
+    """Validate the stock ``net.*`` Anima 2B / 2.9B signature and selected weights.
 
     The two signature checks mirror ComfyUI model detection: Anima must contain
     its LLM adapter and ``x_embedder`` must report 2048 model channels.  Block
-    coverage is fixed to 0..27.  Export callers should keep
+    coverage must be contiguous, either 0..27 or 0..39. Export callers should keep
     ``require_selected_tensors=True`` so every selected matrix is also checked
     against the static architecture shape before expensive rotation begins.
     """
 
-    specs = get_anima_tensor_specs(preset)
+    _validate_preset(preset)
 
     x_embedder = state_dict.get(ANIMA_X_EMBEDDER_SIGNATURE)
     if x_embedder is None:
@@ -203,7 +228,7 @@ def validate_anima_state_dict(
         variant = "Anima 14B" if x_shape[0] == 5120 else "unsupported model"
         raise AnimaContractError(
             f"{variant} detected with model_channels={x_shape[0]}; "
-            f"only Anima 2B ({ANIMA_MODEL_CHANNELS}) is supported."
+            f"only Anima 2B / 2.9B ({ANIMA_MODEL_CHANNELS}) are supported."
         )
 
     llm_signature = state_dict.get(ANIMA_LLM_ADAPTER_SIGNATURE)
@@ -218,16 +243,19 @@ def validate_anima_state_dict(
         for key in state_dict
         if (match := _BLOCK_PATTERN.match(key)) is not None
     }
-    expected_blocks = set(range(ANIMA_BLOCK_COUNT))
-    if actual_blocks != expected_blocks:
+    block_count = len(actual_blocks)
+    expected_blocks = set(range(block_count))
+    if block_count not in ANIMA_SUPPORTED_BLOCK_COUNTS or actual_blocks != expected_blocks:
         missing = sorted(expected_blocks - actual_blocks)
         unexpected = sorted(actual_blocks - expected_blocks)
         raise AnimaContractError(
-            "Anima 2B block contract mismatch: "
+            "Anima block contract mismatch: expected contiguous 28 (2B) or 40 (2.9B) "
+            f"blocks, got {block_count}; "
             f"missing={missing[:8]} ({len(missing)} total), "
             f"unexpected={unexpected[:8]} ({len(unexpected)} total)."
         )
 
+    specs = get_anima_tensor_specs(preset, block_count=block_count)
     if not require_selected_tensors:
         return specs
 
@@ -248,6 +276,7 @@ __all__ = [
     "ANIMA_ADALN_LORA_DIM",
     "ANIMA_ADALN_OUTPUT_DIM",
     "ANIMA_BLOCK_COUNT",
+    "ANIMA_SUPPORTED_BLOCK_COUNTS",
     "ANIMA_CONTEXT_DIM",
     "ANIMA_HEAD_DIM",
     "ANIMA_LLM_ADAPTER_SIGNATURE",

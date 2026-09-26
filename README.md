@@ -1,6 +1,6 @@
 # Anima, Krea2 & MiniMax H3 INT8 ConvRot for ComfyUI
 
-Self-contained ComfyUI Backend V3 output nodes that export unpatched Anima 2B,
+Self-contained ComfyUI Backend V3 output nodes that export unpatched Anima 2B / 2.9B,
 Krea2 Raw/Turbo, and MiniMax H3 `MODEL` inputs as stock ComfyUI
 `int8_tensorwise` checkpoints with Regular ConvRot group size 256.
 
@@ -13,7 +13,7 @@ modification.
 
 | Node | Quantized matrices | High-precision boundary |
 | --- | ---: | --- |
-| Anima INT8 ConvRot Save | 426 or 448 | Preset-dependent; embedders, final layer, LLM adapter, and norms remain unchanged |
+| Anima INT8 ConvRot Save | 2B: 426 or 448; 2.9B: 618 or 640 | Preset-dependent; embedders, final layer, LLM adapter, and norms remain unchanged |
 | Krea2 INT8 ConvRot Save | 224 | `first`, `tmlp`, `txtmlp`, `txtfusion`, `last`, `tproj`, modulation, and norms remain unchanged |
 | MiniMax H3 INT8 ConvRot Save | 200 | Token refiner, conditioning/input/output projections, AdaLN, biases, norms, and buffers remain unchanged |
 
@@ -23,13 +23,13 @@ No frontend JavaScript or tab patching is needed.
 
 ## Requirements
 
-- ComfyUI 0.31.0 or newer with Backend V3, MiniMax H3, and native INT8 ConvRot support
+- ComfyUI 0.33.1 or newer with Backend V3, Anima depth detection, and native INT8 ConvRot support
 - Python 3.10 or newer
-- An original floating-point Anima 2B, Krea2 Raw/Turbo, or supported MiniMax H3 diffusion model
+- An original floating-point Anima 2B / 2.9B, Krea2 Raw/Turbo, or supported MiniMax H3 diffusion model
 - `safetensors` (installed from this repository's `requirements.txt`)
 
-ComfyUI supplies PyTorch and the runtime INT8 loader. The current local
-validation checkout is ComfyUI `v0.32.0-6-g725e6ec6`.
+ComfyUI supplies PyTorch and the runtime INT8 loader. Stock model detection
+is checked against ComfyUI `v0.33.1`; see `docs/validation.md` for validation limits.
 
 Krea2 here means the local open-weight Krea2 Raw/Turbo model. It is not
 FLUX.1 Krea [dev], and it is not the hosted Krea API's Medium/Large model
@@ -73,11 +73,18 @@ summary containing counts, size, device, and optional hash.
 
 ## Presets
 
-Anima:
+Anima (28-block 2B and 40-block 2.9B are detected automatically):
 
-- `quality_keep` (default): quantizes 426 weights. Block 0 and block 1 AdaLN
-  modulation weights stay in source precision.
-- `public_examples`: quantizes all 448 eligible transformer weights.
+- `quality_keep` (default): quantizes 426 weights for 2B, or 618 for 2.9B.
+  All block 0 weights and block 1 AdaLN modulation weights stay in source precision.
+- `public_examples`: quantizes all 448 (2B) or 640 (2.9B) eligible transformer weights.
+  For 2.9B this matches the selected keys, shapes, FP32 scales, and ConvRot markers
+  of `Anima-2.9B-preview-v1_int8_convrot.safetensors`.
+
+Use the original BF16/FP16 model as input; the already-INT8 checkpoint is a
+format reference, not an input to re-quantize. The same Anima node and saved
+workflows support both depths. See [`docs/anima.md`](docs/anima.md) for the
+reference details and validation scope.
 
 Krea2:
 

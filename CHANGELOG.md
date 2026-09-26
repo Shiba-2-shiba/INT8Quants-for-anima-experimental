@@ -4,6 +4,10 @@ All notable changes are documented here. Versions follow semantic versioning.
 
 ## 0.1.0 - Unreleased
 
+- Add automatic Anima 2.9B (40-block) detection to the existing Anima node,
+  with 618/640 INT8 selections and unchanged 2B 426/448 defaults.
+- Check the 2.9B public selection against the reference checkpoint's keys,
+  shapes, scales, and ConvRot markers; require ComfyUI 0.33.1 for depth detection.
 - Provide the Anima 2B INT8 ConvRot Backend V3 output node.
 - Integrate the minimal Anima contract, ConvRot, and state-dict writer directly
   into the custom node.

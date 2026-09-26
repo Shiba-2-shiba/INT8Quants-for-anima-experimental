@@ -39,7 +39,7 @@ jobs:
       - name: Check out validated ComfyUI revision
         run: |
           git clone https://github.com/Comfy-Org/ComfyUI.git .ci/ComfyUI
-          git -C .ci/ComfyUI checkout 917faef771a2fd2f14f44af94f17da3d0b2803a3
+          git -C .ci/ComfyUI checkout v0.33.1
       - name: Install integration dependencies
         run: |
           python -m pip install --upgrade pip

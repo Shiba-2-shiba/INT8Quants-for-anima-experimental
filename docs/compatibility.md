@@ -4,24 +4,30 @@
 
 | Component | Supported |
 | --- | --- |
-| Models | Anima 2B; Krea2 Raw; Krea2 Turbo; MiniMax H3 reference architecture |
+| Models | Anima 2B / 2.9B; Krea2 Raw; Krea2 Turbo; MiniMax H3 reference architecture |
+| Anima architecture | Width 2048, contiguous 28 or 40 blocks; depth detected automatically |
 | Krea2 architecture | Native ComfyUI 28-block, width-6144 open-weight model |
 | MiniMax H3 architecture | Native ComfyUI 50-block, two-token-refiner, width-5376 curve form |
 | Source dtype | Anima/Krea2: BF16 or FP16; MiniMax H3: BF16 or FP32 in-memory weights |
 | Output | Stock ComfyUI `int8_tensorwise` safetensors |
 | Output directory | Configured ComfyUI `output/diffusion_models/` |
 | ConvRot | Regular Hadamard, group size 256 |
-| Anima presets | `quality_keep` (426), `public_examples` (448) |
+| Anima presets | 2B: `quality_keep` (426), `public_examples` (448); 2.9B: 618 / 640 |
 | Krea2 presets | `quality_keep` (224) |
 | MiniMax H3 presets | `strict_reference` (200) |
 | MiniMax H3 RAM | Streaming export adds about 230.4 MiB; 64 GB BF16 / 96 GB FP32 total system RAM recommended (provisional) |
 | Python | 3.10 or newer |
 | ComfyUI API | Backend V3 `v0_0_2` |
-| Minimum ComfyUI | 0.31.0 (MiniMax H3 plus corrected AV sampling settings) |
+| Minimum ComfyUI | 0.33.1 (includes automatic Anima depth detection for 2.9B) |
 
 FLUX.1 Krea [dev], hosted Krea API models, Anima 14B, MiniMax H3 time-embedder
 or non-50/2 variants, Diffusers folders as a direct node input, and
 already-quantized `MODEL` inputs are not supported.
+
+Anima depths other than 28 and 40 are not supported. Older ComfyUI versions
+may build only 28 blocks from a 40-block checkpoint; update ComfyUI before
+loading a 2.9B source, because this exporter sees only the loaded `MODEL`.
+See [`anima.md`](anima.md) for the inspected 2.9B format reference.
 
 ## Validation environment
 

@@ -172,6 +172,122 @@ def test_anima_validation_rejects_14b_and_wrong_selected_shape():
         anima.validate_anima_state_dict(state)
 
 
+def _expanded_anima_state():
+    state = _shape_only_anima_state("public_examples")
+    # Copy observed 2B block shapes, independently of the new 40-block selector.
+    for block in range(28, 40):
+        for name in _block_names(0):
+            state[name.replace("blocks.0.", f"blocks.{block}.")] = state[name]
+    return state
+
+
+@pytest.mark.parametrize("preset,count", [("quality_keep", 618), ("public_examples", 640)])
+def test_anima_29b_selects_all_40_blocks_with_existing_keep_boundary(preset, count):
+    specs = anima.validate_anima_state_dict(_expanded_anima_state(), preset=preset)
+    expected = tuple(name for block in range(40) for name in _block_names(block))
+    if preset == "quality_keep":
+        expected = _block_names(1, BLOCK1_QUALITY_SUFFIXES) + tuple(
+            name for block in range(2, 40) for name in _block_names(block)
+        )
+    assert tuple(spec.name for spec in specs) == expected
+    assert len(specs) == count
+    assert anima.get_anima_tensor_names(preset, block_count=40) == expected
+    assert anima.expected_quantized_tensors(preset, block_count=40) == count
+    assert all(spec.shape[1] % 256 == 0 for spec in specs)
+
+
+@pytest.mark.parametrize("block_count", [0, 27, 29, 39, 41])
+def test_anima_rejects_unsupported_depths(block_count):
+    state = _expanded_anima_state()
+    state = {k: v for k, v in state.items()
+             if not k.startswith("net.blocks.") or int(k.split(".")[2]) < block_count}
+    if block_count == 41:
+        state["net.blocks.40.self_attn.q_proj.weight"] = _ShapeOnlyTensor((2048, 2048))
+    with pytest.raises(anima.AnimaContractError, match="block contract"):
+        anima.validate_anima_state_dict(state, require_selected_tensors=False)
+    with pytest.raises(anima.AnimaContractError, match="block count"):
+        anima.get_anima_tensor_specs(block_count=block_count)
+
+
+def test_anima_29b_rejects_missing_internal_block_and_wrong_last_block_shape():
+    state = _expanded_anima_state()
+    without_block = {k: v for k, v in state.items() if not k.startswith("net.blocks.30.")}
+    with pytest.raises(anima.AnimaContractError, match="block contract"):
+        anima.validate_anima_state_dict(without_block, require_selected_tensors=False)
+    # Even 40 distinct indices are insufficient if they are not contiguous.
+    without_block["net.blocks.40.self_attn.q_proj.weight"] = _ShapeOnlyTensor((2048, 2048))
+    with pytest.raises(anima.AnimaContractError, match="block contract"):
+        anima.validate_anima_state_dict(without_block, require_selected_tensors=False)
+    state["net.blocks.39.mlp.layer1.weight"] = _ShapeOnlyTensor((4096, 2048))
+    with pytest.raises(anima.AnimaContractError, match="shape mismatch.*blocks.39"):
+        anima.validate_anima_state_dict(state)
+
+
+def test_anima_29b_reference_checkpoint_structure():
+    """Optional real-reference gate; read only the header and tiny quant markers."""
+    import os
+    import struct
+
+    reference = os.environ.get("ANIMA_29B_REFERENCE")
+    if not reference:
+        pytest.skip("Set ANIMA_29B_REFERENCE to the public INT8 ConvRot checkpoint")
+    with open(reference, "rb") as handle:
+        header_size = struct.unpack("<Q", handle.read(8))[0]
+        assert 0 < header_size < 16 * 1024 * 1024
+        header = json.loads(handle.read(header_size))
+        tensors = {k: v for k, v in header.items() if k != "__metadata__"}
+        state = {k: _ShapeOnlyTensor(v["shape"]) for k, v in tensors.items()}
+        specs = anima.validate_anima_state_dict(state, preset="public_examples")
+        selected = {spec.name for spec in specs}
+        assert len(selected) == 640
+        assert selected == {k for k, v in tensors.items() if v["dtype"] == "I8"}
+        scales = {name.removesuffix(".weight") + ".weight_scale" for name in selected}
+        markers = {name.removesuffix(".weight") + ".comfy_quant" for name in selected}
+        assert scales == {k for k in tensors if k.endswith(".weight_scale")}
+        assert markers == {k for k in tensors if k.endswith(".comfy_quant")}
+        assert len(tensors.keys() - selected - scales - markers) == 288
+        for spec in specs:
+            layer = spec.name.removesuffix(".weight")
+            scale = tensors[f"{layer}.weight_scale"]
+            assert scale["dtype"] == "F32" and scale["shape"] == [spec.shape[0], 1]
+            marker = tensors[f"{layer}.comfy_quant"]
+            assert marker["dtype"] == "U8"
+            start, end = marker["data_offsets"]
+            handle.seek(8 + header_size + start)
+            raw = handle.read(end - start)
+            assert raw == json.dumps({
+                "format": "int8_tensorwise", "convrot": True, "convrot_groupsize": 256
+            }).encode("utf-8")
+        assert all(v["dtype"] == "BF16" for k, v in tensors.items()
+                   if k not in selected | scales | markers)
+
+
+@pytest.mark.parametrize("preset,count", [("quality_keep", 618), ("public_examples", 640)])
+def test_anima_29b_public_export_passes_complete_contract_to_writer(tmp_path, monkeypatch, preset, count):
+    shared_export = export._export_int8_convrot_from_state_dict
+    captured = {}
+    result = object()
+
+    def writer(**kwargs):
+        captured.update(kwargs)
+        return result
+
+    def use_capture_writer(**kwargs):
+        return shared_export(**kwargs, writer=writer)
+
+    monkeypatch.setattr(export, "_export_int8_convrot_from_state_dict", use_capture_writer)
+    state = _expanded_anima_state()
+    assert export.export_anima_int8_convrot_from_state_dict(
+        state_dict=state, output_checkpoint=tmp_path / "anima29b.safetensors",
+        quantization_preset=preset,
+    ) is result
+    assert captured["state_dict"] is state
+    assert len(captured["tensor_specs"]) == count
+    assert captured["tensor_specs"][-1].name == "net.blocks.39.adaln_modulation_mlp.2.weight"
+    assert captured["convrot_groupsize"] == 256
+    assert captured["metadata"]["model_family"] == "anima"
+
+
 def test_regular_hadamard_is_normalized_orthogonal_and_cached():
     torch = pytest.importorskip("torch")
     expected = torch.tensor(

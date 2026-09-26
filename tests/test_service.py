@@ -40,14 +40,21 @@ class FakeTensor:
         return self.element_bytes
 
 
-def anima_state_dict(channels=2048):
+def anima_state_dict(channels=2048, layers=28):
     state = {
         "diffusion_model.x_embedder.proj.1.weight": FakeTensor((channels, 16)),
         "diffusion_model.llm_adapter.blocks.0.cross_attn.q_proj.weight": FakeTensor((8, 8)),
     }
-    for block in range(28):
+    for block in range(layers):
         state[f"diffusion_model.blocks.{block}.self_attn.q_proj.weight"] = FakeTensor((8, 256))
     return state
+
+
+def normalized_anima_state():
+    return {
+        key.replace("diffusion_model.", "net.", 1): value
+        for key, value in anima_state_dict().items()
+    }
 
 
 def krea2_state_dict(features=6144, layers=28):
@@ -204,6 +211,43 @@ def test_extract_does_not_duplicate_existing_net_prefix():
     result = service.extract_anima_state_dict(FakeModel(state=state))
     assert "net.x_embedder.proj.1.weight" in result
     assert all(not key.startswith("net.net.") for key in result)
+
+
+@pytest.mark.parametrize("preset,count", [("quality_keep", 618), ("public_examples", 640)])
+def test_anima_29b_extraction_and_publication_use_detected_count(tmp_path, preset, count):
+    state = service.extract_anima_state_dict(FakeModel(state=anima_state_dict(layers=40)))
+    assert "net.blocks.39.self_attn.q_proj.weight" in state
+    assert service.expected_quantized_tensors(preset, state) == count
+    paths = service.resolve_output_paths(tmp_path / "output" / "diffusion_models", "anima29b")
+
+    def exporter(**kwargs):
+        assert kwargs["state_dict"] is state
+        Path(kwargs["output_checkpoint"]).write_bytes(b"checkpoint")
+        return {"quantized_tensor_count": count, "rotated_tensor_count": count}
+
+    report, report_path = service.export_anima_int8_convrot(
+        state_dict=state, paths=paths, device="cpu", overwrite=False,
+        write_report=True, hash_output=False, quantization_preset=preset, exporter=exporter,
+    )
+    assert report["quantized_tensor_count"] == count
+    assert json.loads(Path(report_path).read_text())["quantized_tensor_count"] == count
+
+
+def test_anima_29b_rejects_truncated_2b_export_report(tmp_path):
+    state = service.extract_anima_state_dict(FakeModel(state=anima_state_dict(layers=40)))
+    paths = service.resolve_output_paths(tmp_path / "output" / "diffusion_models", "truncated")
+
+    def exporter(**kwargs):
+        Path(kwargs["output_checkpoint"]).write_bytes(b"partial")
+        return {"quantized_tensor_count": 426, "rotated_tensor_count": 426}
+
+    with pytest.raises(service.QuantizationNodeError, match="expected_quantized=618"):
+        service.export_anima_int8_convrot(
+            state_dict=state, paths=paths, device="cpu", overwrite=False,
+            write_report=True, hash_output=False, exporter=exporter,
+        )
+    assert not paths.checkpoint.exists()
+    assert not paths.report.exists()
 
 
 def test_extract_rejects_patched_model():
@@ -388,7 +432,7 @@ def test_export_publishes_checkpoint_and_report_atomically(tmp_path):
         }
 
     report, report_path = service.export_anima_int8_convrot(
-        state_dict={"x": FakeTensor((1,))},
+        state_dict=normalized_anima_state(),
         paths=paths,
         device="cpu",
         overwrite=False,
@@ -420,7 +464,7 @@ def test_export_supports_public_examples_448_preset(tmp_path):
         }
 
     report, _report_path = service.export_anima_int8_convrot(
-        state_dict={},
+        state_dict=normalized_anima_state(),
         paths=paths,
         device="cpu",
         overwrite=False,
@@ -662,7 +706,7 @@ def test_export_rejects_unknown_quantization_preset(tmp_path):
     paths = service.resolve_output_paths(tmp_path / "output" / "diffusion_models", "invalid")
     with pytest.raises(service.QuantizationNodeError, match="Unsupported quantization_preset"):
         service.export_anima_int8_convrot(
-            state_dict={},
+            state_dict=normalized_anima_state(),
             paths=paths,
             device="cpu",
             overwrite=False,
@@ -683,7 +727,7 @@ def test_export_rejects_insufficient_free_disk_before_quantization(tmp_path, mon
 
     with pytest.raises(service.QuantizationNodeError, match="free disk space"):
         service.export_anima_int8_convrot(
-            state_dict={"x": FakeTensor((1024, 1024))},
+            state_dict=normalized_anima_state(),
             paths=paths,
             device="cpu",
             overwrite=False,
@@ -708,7 +752,7 @@ def test_export_wraps_output_directory_preflight_errors(tmp_path, monkeypatch):
         match="prepare output directory.*disk status unavailable",
     ):
         service.export_anima_int8_convrot(
-            state_dict={},
+            state_dict=normalized_anima_state(),
             paths=paths,
             device="cpu",
             overwrite=False,
@@ -727,7 +771,7 @@ def test_export_rejects_unexpected_quantized_count(tmp_path):
 
     with pytest.raises(service.QuantizationNodeError, match="Unexpected quantization result"):
         service.export_anima_int8_convrot(
-            state_dict={},
+            state_dict=normalized_anima_state(),
             paths=paths,
             device="cpu",
             overwrite=False,
@@ -747,7 +791,7 @@ def test_export_translates_internal_quantization_errors(tmp_path):
 
     with pytest.raises(service.QuantizationNodeError, match="invalid selected tensor"):
         service.export_anima_int8_convrot(
-            state_dict={},
+            state_dict=normalized_anima_state(),
             paths=paths,
             device="cpu",
             overwrite=False,
@@ -815,7 +859,7 @@ def test_export_rolls_back_checkpoint_and_report_when_report_publish_fails(tmp_p
     monkeypatch.setattr(service.os, "replace", fail_new_report)
     with pytest.raises(service.QuantizationNodeError, match="simulated report publish failure"):
         service.export_anima_int8_convrot(
-            state_dict={},
+            state_dict=normalized_anima_state(),
             paths=paths,
             device="cpu",
             overwrite=True,
@@ -854,7 +898,7 @@ def test_export_does_not_replace_report_that_appears_during_no_overwrite_publish
     monkeypatch.setattr(service, "_publish_without_overwrite", create_competing_report)
     with pytest.raises(service.QuantizationNodeError, match="overwrite was disabled"):
         service.export_anima_int8_convrot(
-            state_dict={},
+            state_dict=normalized_anima_state(),
             paths=paths,
             device="cpu",
             overwrite=False,
@@ -878,7 +922,7 @@ def test_export_wraps_unexpected_exporter_errors_with_output_context(tmp_path):
         match=r"writing or publishing .*failure\.safetensors.*simulated writer failure",
     ):
         service.export_anima_int8_convrot(
-            state_dict={},
+            state_dict=normalized_anima_state(),
             paths=paths,
             device="cpu",
             overwrite=False,
@@ -912,7 +956,7 @@ def test_service_wires_the_internal_exporter_through_publication(tmp_path, monke
         "validate_anima_state_dict",
         lambda *_args, **_kwargs: (spec,),
     )
-    monkeypatch.setattr(service, "expected_quantized_tensors", lambda _preset: 1)
+    monkeypatch.setattr(service, "expected_quantized_tensors", lambda _preset, _state: 1)
 
     report, report_path = service.export_anima_int8_convrot(
         state_dict=state,

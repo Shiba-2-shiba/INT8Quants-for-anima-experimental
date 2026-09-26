@@ -81,14 +81,24 @@ class QuantizationNodeError(RuntimeError):
     """Actionable input or environment error raised by the custom node."""
 
 
-def expected_quantized_tensors(quantization_preset: str) -> int:
+def expected_quantized_tensors(
+    quantization_preset: str, state_dict: Mapping[str, Any] | None = None,
+) -> int:
     try:
-        return _expected_quantized_tensors(quantization_preset)
+        default_count = _expected_quantized_tensors(quantization_preset)
     except AnimaContractError as exc:
         supported = ", ".join(QUANTIZATION_PRESETS)
         raise QuantizationNodeError(
             f"Unsupported quantization_preset {quantization_preset!r}; expected one of: {supported}."
         ) from exc
+    if state_dict is None:
+        return default_count
+    try:
+        return len(validate_anima_state_dict(
+            state_dict, preset=quantization_preset, require_selected_tensors=False,
+        ))
+    except AnimaContractError as exc:
+        raise QuantizationNodeError(str(exc)) from exc
 
 
 def expected_krea2_quantized_tensors(quantization_preset: str) -> int:
@@ -676,7 +686,7 @@ def export_anima_int8_convrot(
         family="anima",
         project="anima-int8-convrot",
         model_display_name="Anima",
-        expected_count=expected_quantized_tensors(quantization_preset),
+        expected_count=expected_quantized_tensors(quantization_preset, state_dict),
         default_exporter=export_anima_int8_convrot_from_state_dict,
         device=device,
         overwrite=overwrite,

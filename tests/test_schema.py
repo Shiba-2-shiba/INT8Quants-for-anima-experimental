@@ -151,7 +151,7 @@ def test_execute_reports_progress_and_returns_stable_summary(tmp_path, monkeypat
     )
     monkeypatch.setattr(node_module, "extract_anima_state_dict", lambda _model: {"x": object()})
     monkeypatch.setattr(node_module, "estimate_state_dict_bytes", lambda _state: 123)
-    monkeypatch.setattr(node_module, "expected_quantized_tensors", lambda _preset: 2)
+    monkeypatch.setattr(node_module, "expected_quantized_tensors", lambda _preset, _state: 2)
 
     def fake_export(**kwargs):
         kwargs["progress"](
@@ -203,6 +203,54 @@ def test_execute_reports_progress_and_returns_stable_summary(tmp_path, monkeypat
     assert progress_updates[0][:2] == ("init", 2)
     assert progress_updates[-2:] == [("update", 1, 2), ("update", 2, 2)]
     assert registered_paths == [("diffusion_models", str(output_root))]
+
+
+@pytest.mark.parametrize("layers,preset,count", [
+    (28, "quality_keep", 426), (28, "public_examples", 448),
+    (40, "quality_keep", 618), (40, "public_examples", 640),
+])
+def test_anima_execute_uses_detected_depth_for_progress(tmp_path, monkeypatch, layers, preset, count):
+    if importlib.util.find_spec("folder_paths") is None:
+        pytest.skip("ComfyUI checkout is required for the Backend V3 integration test")
+    package = load_package()
+    extension = asyncio.run(package.comfy_entrypoint())
+    node_class = asyncio.run(extension.get_node_list())[0]
+    node_module = sys.modules[node_class.__module__]
+    node_class.hidden = types.SimpleNamespace(unique_id="anima-depth")
+    updates = []
+
+    class Progress:
+        def __init__(self, total, node_id=None):
+            updates.append((0, total))
+
+        def update_absolute(self, current, total):
+            updates.append((current, total))
+
+    state = {
+        "net.x_embedder.proj.1.weight": types.SimpleNamespace(shape=(2048, 68)),
+        "net.llm_adapter.blocks.0.cross_attn.q_proj.weight": types.SimpleNamespace(shape=(1024, 1024)),
+        **{f"net.blocks.{block}.self_attn.q_proj.weight": object() for block in range(layers)},
+    }
+    monkeypatch.setattr(node_module, "ProgressBar", Progress)
+    monkeypatch.setattr(node_module, "extract_anima_state_dict", lambda _: state)
+    monkeypatch.setattr(node_module, "estimate_state_dict_bytes", lambda _: 1)
+    monkeypatch.setattr(node_module.folder_paths, "get_output_directory", lambda: str(tmp_path / "output"))
+    monkeypatch.setattr(node_module.folder_paths, "add_model_folder_path", lambda *_: None)
+
+    def fake_export(**kwargs):
+        assert kwargs["state_dict"] is state
+        assert kwargs["quantization_preset"] == preset
+        kwargs["progress"]({"stage": "quantize_tensor", "quantized_tensor_count": count,
+                            "selected_tensor_count": count})
+        return {"status": "model_written", "quantized_tensor_count": count}, ""
+
+    monkeypatch.setattr(node_module, "export_anima_int8_convrot", fake_export)
+    result = node_class.execute(
+        model=object(), filename_prefix="anima", quantization_preset=preset,
+        device="cpu", overwrite=False, write_report=False, hash_output=False,
+    )
+    assert updates == [(0, count), (count, count), (count, count)]
+    assert json.loads(result.result[2])["quantized_tensor_count"] == count
 
 
 def test_krea2_execute_uses_krea2_contract_and_default_prefix(tmp_path, monkeypatch):
@@ -345,6 +393,44 @@ def test_minimax_h3_execute_uses_reference_contract_and_family_folder(tmp_path, 
     assert captured["progress"] == (200, "minimax-h3-node")
     assert captured["last_progress"] == (200, 200)
     assert captured["export"]["quantization_preset"] == "strict_reference"
+
+
+@pytest.mark.parametrize("layers", [28, 40])
+def test_stock_comfyui_detects_anima_depth_and_quant_markers(layers):
+    comfy_spec = importlib.util.find_spec("comfy")
+    if comfy_spec is None or not comfy_spec.submodule_search_locations:
+        pytest.skip("ComfyUI checkout is required for stock loader contract validation")
+
+    import ast
+    import logging
+    import math
+
+    comfy_root = Path(next(iter(comfy_spec.submodule_search_locations)))
+    namespace = {"math": math, "logging": logging}
+    for filename, names in (
+        ("model_detection.py", {"any_suffix_in", "calculate_transformer_depth", "count_blocks", "detect_unet_config"}),
+        ("utils.py", {"detect_layer_quantization"}),
+    ):
+        path = comfy_root / filename
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        functions = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
+        assert {node.name for node in functions} == names
+        module = ast.fix_missing_locations(ast.Module(body=functions, type_ignores=[]))
+        exec(compile(module, str(path), "exec"), namespace)
+
+    state = {
+        "x_embedder.proj.1.weight": types.SimpleNamespace(shape=(2048, 68)),
+        "llm_adapter.blocks.0.cross_attn.q_proj.weight": types.SimpleNamespace(shape=(1024, 1024)),
+        **{f"blocks.{block}.mlp.layer1.weight": types.SimpleNamespace(shape=(8192, 2048))
+           for block in range(layers)},
+        f"blocks.{layers - 1}.mlp.layer1.comfy_quant": types.SimpleNamespace(shape=(72,)),
+    }
+    config = namespace["detect_unet_config"](state, "")
+    assert config["image_model"] == "anima"
+    assert config["model_channels"] == 2048
+    assert config["num_blocks"] == layers
+    assert config["num_heads"] == 16
+    assert namespace["detect_layer_quantization"](state, "") == {"mixed_ops": True}
 
 
 def test_stock_comfyui_detects_the_exported_krea2_namespace_and_quant_markers():

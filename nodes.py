@@ -54,17 +54,21 @@ _ANIMA_PROFILE = _NodeProfile(
     node_id="ComfyQuantsAnimaInt8ConvRotSave",
     display_name="Anima INT8 ConvRot Save",
     model_name="Anima",
-    model_tooltip="Unpatched Anima 2B MODEL from Load Diffusion Model.",
+    model_tooltip=(
+        "Unpatched Anima 2B or 2.9B MODEL from Load Diffusion Model; "
+        "depth is detected automatically."
+    ),
     description=(
-        "Quantize an unpatched Anima 2B MODEL to stock ComfyUI INT8 ConvRot "
+        "Quantize an unpatched Anima 2B or 2.9B MODEL to stock ComfyUI INT8 ConvRot "
         "and save it as safetensors."
     ),
     filename_prefix="anima_int8_convrot",
     presets=tuple(QUANTIZATION_PRESETS),
     default_preset=DEFAULT_QUANTIZATION_PRESET,
     preset_tooltip=(
-        "quality_keep: keep block 0 and block 1 AdaLN in source precision (426 INT8). "
-        "public_examples: match the inspected public checkpoints (448 INT8)."
+        "quality_keep: keep all block 0 weights and block 1 AdaLN in source precision "
+        "(2B: 426; 2.9B: 618 INT8). "
+        "public_examples: match the inspected public checkpoints (2B: 448; 2.9B: 640 INT8)."
     ),
     search_aliases=("anima", "int8", "convrot", "comfy quants", "quantize"),
 )
@@ -211,7 +215,7 @@ def _execute_export(
     write_report: bool,
     hash_output: bool,
     extract_state_dict: Callable[[Any], dict[str, Any]],
-    expected_count_for_preset: Callable[[str], int],
+    expected_count_for_preset: Callable[[str, Mapping[str, Any]], int],
     export_checkpoint: Callable[..., tuple[dict[str, Any], str]],
 ) -> io.NodeOutput:
     state_dict = extract_state_dict(model)
@@ -227,7 +231,7 @@ def _execute_export(
         paths.checkpoint,
     )
 
-    expected_count = expected_count_for_preset(quantization_preset)
+    expected_count = expected_count_for_preset(quantization_preset, state_dict)
     progress_bar = ProgressBar(expected_count, node_id=node_class.hidden.unique_id)
 
     def progress(event: Mapping[str, Any]) -> None:
@@ -333,7 +337,7 @@ class ComfyQuantsKrea2Int8ConvRotSave(io.ComfyNode):
             write_report=write_report,
             hash_output=hash_output,
             extract_state_dict=extract_krea2_state_dict,
-            expected_count_for_preset=expected_krea2_quantized_tensors,
+            expected_count_for_preset=lambda preset, _state: expected_krea2_quantized_tensors(preset),
             export_checkpoint=export_krea2_int8_convrot,
         )
 
@@ -366,7 +370,7 @@ class ComfyQuantsMiniMaxH3Int8ConvRotSave(io.ComfyNode):
             write_report=write_report,
             hash_output=hash_output,
             extract_state_dict=extract_minimax_h3_state_dict,
-            expected_count_for_preset=expected_minimax_h3_quantized_tensors,
+            expected_count_for_preset=lambda preset, _state: expected_minimax_h3_quantized_tensors(preset),
             export_checkpoint=export_minimax_h3_int8_convrot,
         )
 

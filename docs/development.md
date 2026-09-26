@@ -38,7 +38,7 @@ python -B -m pytest -q
 2. Keep Anima names and shapes centralized in `quantization/anima.py`.
 3. Do not add runtime path manipulation or an external `comfy_quants`
    dependency.
-4. Verify both Anima presets, the Krea2 224-weight contract, the MiniMax H3
+4. Verify both Anima presets at 28 and 40 blocks, the Krea2 224-weight contract, the MiniMax H3
    200-weight contract, marker bytes, input non-mutation, and transaction
    rollback after quantization changes.
 5. Record real-model export, stock reload, and inference evidence before a

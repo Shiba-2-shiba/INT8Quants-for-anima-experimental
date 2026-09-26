@@ -44,7 +44,11 @@ The extraction boundary is deliberately model-specific:
 ## Quantization core
 
 - `contracts.py` contains the shared name/shape value object.
-- `anima.py` owns the Anima 2B signature, 28-block shapes, and 426/448 presets.
+- `anima.py` owns the Anima width-2048 signature, contiguous 28/40-block
+  detection, exact shapes, and 426/448 (2B) or 618/640 (2.9B) presets. Public
+  selection helpers default to 28 blocks for existing callers; validation
+  detects depth from the state dict. Node progress and publication count checks
+  use this same detected selection.
 - `krea2.py` owns the Krea2 signature, fixed open-weight architecture, and 224
   block-linear selection.
 - `minimax_h3.py` owns the supported 50/2 curve-form signature and the exact

@@ -939,7 +939,7 @@ def export_anima_int8_convrot_from_state_dict(
     metadata: Mapping[str, Any] | None = None,
     progress: Callable[[dict[str, Any]], None] | None = None,
 ) -> Int8ExportReport:
-    """Export an Anima 2B state dict as a stock-ComfyUI INT8 checkpoint."""
+    """Export an Anima 2B / 2.9B state dict as a stock-ComfyUI INT8 checkpoint."""
 
     if family != "anima":
         detail = (
