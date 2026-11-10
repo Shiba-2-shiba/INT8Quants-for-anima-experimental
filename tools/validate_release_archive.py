@@ -25,6 +25,7 @@ REQUIRED = {
     "quantization/convrot.py",
     "quantization/export.py",
     "quantization/krea2.py",
+    "quantization/moss_image.py",
     "requirements.txt",
     "service.py",
 }
@@ -141,6 +142,7 @@ sys.modules[quant_spec.name] = quantization
 quant_spec.loader.exec_module(quantization)
 assert callable(quantization.export_anima_int8_convrot_from_state_dict)
 assert callable(quantization.export_krea2_int8_convrot_from_state_dict)
+assert callable(quantization.export_moss_image_int8_convrot_from_state_dict)
 """
         subprocess.run(
             [sys.executable, "-B", "-c", check],

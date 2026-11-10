@@ -8,6 +8,7 @@
 | Anima architecture | Width 2048, contiguous 28 or 40 blocks; depth detected automatically |
 | Krea2 architecture | Native ComfyUI 28-block, width-6144 open-weight model |
 | MiniMax H3 architecture | Native ComfyUI 50-block, two-token-refiner, width-5376 curve form |
+| Moss Image architecture | Native 42-layer, width-3072 model; fused or separate QKV; BF16/FP16/FP32 source |
 | Source dtype | Anima/Krea2: BF16 or FP16; MiniMax H3: BF16 or FP32 in-memory weights |
 | Output | Stock ComfyUI `int8_tensorwise` safetensors |
 | Output directory | Configured ComfyUI `output/diffusion_models/` |
@@ -15,10 +16,12 @@
 | Anima presets | 2B: `quality_keep` (426), `public_examples` (448); 2.9B: 618 / 640 |
 | Krea2 presets | `quality_keep` (224) |
 | MiniMax H3 presets | `strict_reference` (200) |
+| Moss Image presets | `quality_keep` (168 fused QKV / 252 separate QKV) |
 | MiniMax H3 RAM | Streaming export adds about 230.4 MiB; 64 GB BF16 / 96 GB FP32 total system RAM recommended (provisional) |
 | Python | 3.10 or newer |
 | ComfyUI API | Backend V3 `v0_0_2` |
 | Minimum ComfyUI | 0.33.1 (includes automatic Anima depth detection for 2.9B) |
+| Moss Image host | Requires a newer ComfyUI with native `moss_image` detection; see [moss_image.md](moss_image.md) |
 
 FLUX.1 Krea [dev], hosted Krea API models, Anima 14B, MiniMax H3 time-embedder
 or non-50/2 variants, Diffusers folders as a direct node input, and

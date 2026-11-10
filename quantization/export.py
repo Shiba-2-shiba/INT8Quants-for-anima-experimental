@@ -5,7 +5,7 @@
 # Derived from Comfy-Org/comfy-quants at
 # 1e0d481f24847c4914578f5468917902ad53ea46, principally
 # comfy_quants/backends/int8_tensorwise_model_export.py and comfy_quants/api.py.
-# This version is limited to the in-memory Anima, Krea2, and MiniMax H3 paths.
+# This version supports the in-memory Anima, Krea2, MiniMax H3, and Moss Image paths.
 
 """Write self-contained INT8 ConvRot checkpoints for stock ComfyUI."""
 
@@ -38,6 +38,10 @@ from .safetensors_stream import (
     tensor_bytes_view,
     write_all,
     write_streaming_file,
+)
+from .moss_image import (
+    DEFAULT_MOSS_IMAGE_QUANTIZATION_PRESET,
+    validate_moss_image_state_dict,
 )
 
 INT8_TENSORWISE_FORMAT_NAME = "int8_tensorwise"
@@ -1008,6 +1012,45 @@ def export_krea2_int8_convrot_from_state_dict(
     )
 
 
+def export_moss_image_int8_convrot_from_state_dict(
+    *,
+    state_dict: Mapping[str, Any],
+    output_checkpoint: str | Path,
+    family: str = "moss_image",
+    convrot: bool = True,
+    convrot_groupsize: int = CONVROT_GROUP_SIZE,
+    device: str = "cpu",
+    strict: bool = True,
+    validate_source_dtype: bool = True,
+    quantization_preset: str = DEFAULT_MOSS_IMAGE_QUANTIZATION_PRESET,
+    require_all_rotated: bool = True,
+    hash_output: bool = False,
+    metadata: Mapping[str, Any] | None = None,
+    progress: Callable[[dict[str, Any]], None] | None = None,
+) -> Int8ExportReport:
+    """Export MOSS-Image using bounded-memory streaming and native QKV keys."""
+    if family != "moss_image":
+        raise QuantizationExportError(f"unsupported INT8 state_dict family {family!r}: expected 'moss_image'")
+    return _export_int8_convrot_from_state_dict(
+        state_dict=state_dict,
+        output_checkpoint=output_checkpoint,
+        family=family,
+        validator=validate_moss_image_state_dict,
+        convrot=convrot,
+        convrot_groupsize=convrot_groupsize,
+        device=device,
+        strict=strict,
+        validate_source_dtype=validate_source_dtype,
+        allowed_source_dtype_names=("bfloat16", "float16", "float32"),
+        require_all_rotated=require_all_rotated,
+        hash_output=hash_output,
+        metadata=metadata,
+        quantization_preset=quantization_preset,
+        progress=progress,
+        writer=_write_int8_convrot_checkpoint_streaming_from_specs,
+    )
+
+
 def export_minimax_h3_int8_convrot_from_state_dict(
     *,
     state_dict: Mapping[str, Any],
@@ -1058,4 +1101,5 @@ __all__ = [
     "export_anima_int8_convrot_from_state_dict",
     "export_krea2_int8_convrot_from_state_dict",
     "export_minimax_h3_int8_convrot_from_state_dict",
+    "export_moss_image_int8_convrot_from_state_dict",
 ]

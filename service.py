@@ -15,6 +15,13 @@ from .quantization import (
     export_anima_int8_convrot_from_state_dict,
     export_krea2_int8_convrot_from_state_dict,
     export_minimax_h3_int8_convrot_from_state_dict,
+    export_moss_image_int8_convrot_from_state_dict,
+)
+from .quantization.moss_image import (
+    DEFAULT_MOSS_IMAGE_QUANTIZATION_PRESET,
+    MOSS_IMAGE_QUANTIZATION_PRESETS,
+    MossImageContractError,
+    validate_moss_image_state_dict,
 )
 from .quantization.export import DEFAULT_STREAMING_CHUNK_BYTES
 from .quantization.anima import (
@@ -48,6 +55,8 @@ DEFAULT_KREA2_PRESET = DEFAULT_KREA2_QUANTIZATION_PRESET
 KREA2_PRESETS = KREA2_QUANTIZATION_PRESETS
 DEFAULT_MINIMAX_H3_PRESET = DEFAULT_MINIMAX_H3_QUANTIZATION_PRESET
 MINIMAX_H3_PRESETS = MINIMAX_H3_QUANTIZATION_PRESETS
+DEFAULT_MOSS_IMAGE_PRESET = DEFAULT_MOSS_IMAGE_QUANTIZATION_PRESET
+MOSS_IMAGE_PRESETS = MOSS_IMAGE_QUANTIZATION_PRESETS
 DISK_HEADROOM_BYTES = 64 * 1024 * 1024
 _INVALID_FILENAME_CHARS = frozenset('<>:"|?*')
 _WINDOWS_RESERVED_NAMES = frozenset(
@@ -234,6 +243,25 @@ def extract_krea2_state_dict(model: Any) -> dict[str, Any]:
         validate_krea2_state_dict(state_dict, require_selected_tensors=False)
     except Krea2ContractError as exc:
         raise QuantizationNodeError(str(exc)) from exc
+    return state_dict
+
+
+def expected_moss_image_quantized_tensors(
+    quantization_preset: str, state_dict: Mapping[str, Any],
+) -> int:
+    try:
+        return len(validate_moss_image_state_dict(state_dict, preset=quantization_preset))
+    except MossImageContractError as exc:
+        raise QuantizationNodeError(str(exc)) from exc
+
+
+def extract_moss_image_state_dict(model: Any) -> dict[str, Any]:
+    state_dict = _extract_diffusion_state_dict(
+        model,
+        node_display_name="Moss Image INT8 ConvRot Save",
+        normalize_key=lambda key: key,
+    )
+    expected_moss_image_quantized_tensors(DEFAULT_MOSS_IMAGE_PRESET, state_dict)
     return state_dict
 
 
@@ -579,6 +607,7 @@ def _export_int8_convrot(
             AnimaContractError,
             Krea2ContractError,
             MiniMaxH3ContractError,
+            MossImageContractError,
             QuantizationExportError,
         ) as exc:
             raise QuantizationNodeError(str(exc)) from exc
@@ -718,6 +747,37 @@ def export_krea2_int8_convrot(
         model_display_name="Krea2",
         expected_count=expected_krea2_quantized_tensors(quantization_preset),
         default_exporter=export_krea2_int8_convrot_from_state_dict,
+        device=device,
+        overwrite=overwrite,
+        write_report=write_report,
+        hash_output=hash_output,
+        quantization_preset=quantization_preset,
+        progress=progress,
+        exporter=exporter,
+    )
+
+
+def export_moss_image_int8_convrot(
+    *,
+    state_dict: Mapping[str, Any],
+    paths: OutputPaths,
+    device: str,
+    overwrite: bool,
+    write_report: bool,
+    hash_output: bool,
+    quantization_preset: str = DEFAULT_MOSS_IMAGE_PRESET,
+    progress: Callable[[dict[str, Any]], None] | None = None,
+    exporter: Callable[..., Any] | None = None,
+) -> tuple[dict[str, Any], str]:
+    return _export_int8_convrot(
+        state_dict=state_dict,
+        paths=paths,
+        family="moss_image",
+        project="moss-image-int8-convrot",
+        model_display_name="Moss Image",
+        expected_count=expected_moss_image_quantized_tensors(quantization_preset, state_dict),
+        default_exporter=export_moss_image_int8_convrot_from_state_dict,
+        validate_source_dtype=True,
         device=device,
         overwrite=overwrite,
         write_report=write_report,

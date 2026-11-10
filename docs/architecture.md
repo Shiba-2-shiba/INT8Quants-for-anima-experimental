@@ -1,6 +1,6 @@
 # Architecture
 
-The repository is one self-contained ComfyUI custom-node package with three
+The repository is one self-contained ComfyUI custom-node package with four
 model-specific output nodes and one shared INT8 writer.
 
 ```text
@@ -11,12 +11,12 @@ ComfyUI Backend V3
                   service.py
                      |
                      v
-  quantization/{contracts,anima,krea2,minimax_h3,convrot,export}.py
+  quantization/{contracts,anima,krea2,minimax_h3,moss_image,convrot,export}.py
 ```
 
 ## ComfyUI adapter
 
-`nodes.py` registers separate Anima, Krea2, and MiniMax H3 schemas. A small immutable node
+`nodes.py` registers separate Anima, Krea2, MiniMax H3, and Moss Image schemas. A small immutable node
 profile shares the identical controls, progress handling, and summary shaping
 without merging the public node IDs or model-specific descriptions. Existing
 Anima workflows continue to reference `ComfyQuantsAnimaInt8ConvRotSave`.
@@ -54,11 +54,14 @@ The extraction boundary is deliberately model-specific:
 - `minimax_h3.py` owns the supported 50/2 curve-form signature and the exact
   200 main-block matrix selection inferred from the official reference header.
 - `convrot.py` contains regular-Hadamard generation and offline weight rotation.
+- `moss_image.py` validates the complete 42-layer source layout and selects
+  168 fused-QKV or 252 separate-QKV matrices, preserving the native namespace.
 - `export.py` validates selected tensors, performs rowwise INT8 quantization,
   writes marker/scale tensors, and copies non-selected tensors unchanged.
 
-Public Anima, Krea2, and MiniMax H3 export functions are thin model-contract wrappers around
-the same `_write_int8_convrot_checkpoint_from_specs` implementation. The old
+Public export functions are thin model-contract wrappers around shared writers.
+Anima/Krea2 use `_write_int8_convrot_checkpoint_from_specs`; MiniMax H3 and
+Moss Image use the bounded-memory streaming writer. The old
 `AnimaInt8ExportReport` name remains as an alias for compatibility.
 
 The core has no generic registry, CLI, graph/policy framework, submodule, or

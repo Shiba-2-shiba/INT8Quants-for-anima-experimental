@@ -8,6 +8,7 @@ from .export import (
     export_anima_int8_convrot_from_state_dict,
     export_krea2_int8_convrot_from_state_dict,
     export_minimax_h3_int8_convrot_from_state_dict,
+    export_moss_image_int8_convrot_from_state_dict,
 )
 
 __all__ = [
@@ -17,4 +18,5 @@ __all__ = [
     "export_anima_int8_convrot_from_state_dict",
     "export_krea2_int8_convrot_from_state_dict",
     "export_minimax_h3_int8_convrot_from_state_dict",
+    "export_moss_image_int8_convrot_from_state_dict",
 ]

@@ -39,9 +39,9 @@ python -B -m pytest -q
 3. Do not add runtime path manipulation or an external `comfy_quants`
    dependency.
 4. Verify both Anima presets at 28 and 40 blocks, the Krea2 224-weight contract, the MiniMax H3
-   200-weight contract, marker bytes, input non-mutation, and transaction
+   200-weight contract, Moss Image 168/252-weight contracts, marker bytes, input non-mutation, and transaction
    rollback after quantization changes.
 5. Record real-model export, stock reload, and inference evidence before a
    release.
 6. Keep model-specific namespace normalization and shape validation in the
-   matching `quantization/{anima,krea2,minimax_h3}.py` module.
+   matching `quantization/{anima,krea2,minimax_h3,moss_image}.py` module.

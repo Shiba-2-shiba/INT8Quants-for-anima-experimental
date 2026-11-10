@@ -14,21 +14,26 @@ from comfy_api.v0_0_2 import ComfyExtension, io
 from .service import (
     DEFAULT_KREA2_PRESET,
     DEFAULT_MINIMAX_H3_PRESET,
+    DEFAULT_MOSS_IMAGE_PRESET,
     DEFAULT_QUANTIZATION_PRESET,
     KREA2_PRESETS,
     MINIMAX_H3_PRESETS,
+    MOSS_IMAGE_PRESETS,
     QUANTIZATION_PRESETS,
     OutputPaths,
     estimate_state_dict_bytes,
     expected_krea2_quantized_tensors,
     expected_minimax_h3_quantized_tensors,
+    expected_moss_image_quantized_tensors,
     expected_quantized_tensors,
     export_anima_int8_convrot,
     export_krea2_int8_convrot,
     export_minimax_h3_int8_convrot,
+    export_moss_image_int8_convrot,
     extract_anima_state_dict,
     extract_krea2_state_dict,
     extract_minimax_h3_state_dict,
+    extract_moss_image_state_dict,
     resolve_output_paths,
 )
 
@@ -120,6 +125,26 @@ _MINIMAX_H3_PROFILE = _NodeProfile(
         "comfy quants",
         "quantize",
     ),
+)
+
+
+_MOSS_IMAGE_PROFILE = _NodeProfile(
+    node_id="ComfyQuantsMossImageInt8ConvRotSave",
+    display_name="Moss Image INT8 ConvRot Save",
+    model_name="Moss Image",
+    model_tooltip="Unpatched floating-point 42-layer Moss Image MODEL from Load Diffusion Model.",
+    description=(
+        "Quantize Moss Image transformer projections to stock ComfyUI INT8 ConvRot. "
+        "Preserves text embedders, modulation, norms, final layers, and attention settings."
+    ),
+    filename_prefix="moss_image_int8_convrot",
+    presets=tuple(MOSS_IMAGE_PRESETS),
+    default_preset=DEFAULT_MOSS_IMAGE_PRESET,
+    preset_tooltip=(
+        "quality_keep: quantize 168 matrices with fused QKV (official reference), "
+        "or 252 with separate Q/K/V. Layout is detected automatically; ConvRot group size is 256."
+    ),
+    search_aliases=("moss image", "moss", "int8", "convrot", "comfy quants", "quantize"),
 )
 
 
@@ -375,12 +400,46 @@ class ComfyQuantsMiniMaxH3Int8ConvRotSave(io.ComfyNode):
         )
 
 
+class ComfyQuantsMossImageInt8ConvRotSave(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return _define_schema(_MOSS_IMAGE_PROFILE)
+
+    @classmethod
+    def execute(
+        cls,
+        *,
+        model: Any,
+        filename_prefix: str,
+        quantization_preset: str = DEFAULT_MOSS_IMAGE_PRESET,
+        device: str,
+        overwrite: bool,
+        write_report: bool,
+        hash_output: bool,
+    ) -> io.NodeOutput:
+        return _execute_export(
+            cls,
+            _MOSS_IMAGE_PROFILE,
+            model=model,
+            filename_prefix=filename_prefix,
+            quantization_preset=quantization_preset,
+            device=device,
+            overwrite=overwrite,
+            write_report=write_report,
+            hash_output=hash_output,
+            extract_state_dict=extract_moss_image_state_dict,
+            expected_count_for_preset=expected_moss_image_quantized_tensors,
+            export_checkpoint=export_moss_image_int8_convrot,
+        )
+
+
 class ComfyQuantsExtension(ComfyExtension):
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         return [
             ComfyQuantsAnimaInt8ConvRotSave,
             ComfyQuantsKrea2Int8ConvRotSave,
             ComfyQuantsMiniMaxH3Int8ConvRotSave,
+            ComfyQuantsMossImageInt8ConvRotSave,
         ]
 
 

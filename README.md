@@ -1,10 +1,10 @@
-# Anima, Krea2 & MiniMax H3 INT8 ConvRot for ComfyUI
+# Anima, Krea2, MiniMax H3 & Moss Image INT8 ConvRot for ComfyUI
 
 Self-contained ComfyUI Backend V3 output nodes that export unpatched Anima 2B / 2.9B,
-Krea2 Raw/Turbo, and MiniMax H3 `MODEL` inputs as stock ComfyUI
+Krea2 Raw/Turbo, MiniMax H3, and Moss Image `MODEL` inputs as stock ComfyUI
 `int8_tensorwise` checkpoints with Regular ConvRot group size 256.
 
-The custom node contains only the three model contracts and the INT8 export code
+The custom node contains only the four model contracts and the INT8 export code
 they share. It does not require a `third_party` checkout, Git submodule,
 external `comfy-quants` or `convert_to_quant` package, or runtime `sys.path`
 modification.
@@ -16,6 +16,7 @@ modification.
 | Anima INT8 ConvRot Save | 2B: 426 or 448; 2.9B: 618 or 640 | Preset-dependent; embedders, final layer, LLM adapter, and norms remain unchanged |
 | Krea2 INT8 ConvRot Save | 224 | `first`, `tmlp`, `txtmlp`, `txtfusion`, `last`, `tproj`, modulation, and norms remain unchanged |
 | MiniMax H3 INT8 ConvRot Save | 200 | Token refiner, conditioning/input/output projections, AdaLN, biases, norms, and buffers remain unchanged |
+| Moss Image INT8 ConvRot Save | 168 with fused QKV; 252 with separate Q/K/V | Text embedder, modulation, input/output projections, norms, biases, and attention settings remain unchanged |
 
 Krea2 is a separate node so the existing
 `ComfyQuantsAnimaInt8ConvRotSave` node ID and saved workflows remain compatible.
@@ -25,11 +26,13 @@ No frontend JavaScript or tab patching is needed.
 
 - ComfyUI 0.33.1 or newer with Backend V3, Anima depth detection, and native INT8 ConvRot support
 - Python 3.10 or newer
-- An original floating-point Anima 2B / 2.9B, Krea2 Raw/Turbo, or supported MiniMax H3 diffusion model
+- An original floating-point Anima 2B / 2.9B, Krea2 Raw/Turbo, MiniMax H3, or Moss Image diffusion model
 - `safetensors` (installed from this repository's `requirements.txt`)
 
 ComfyUI supplies PyTorch and the runtime INT8 loader. Stock model detection
 is checked against ComfyUI `v0.33.1`; see `docs/validation.md` for validation limits.
+Moss Image additionally requires a current ComfyUI version with native
+`moss_image` model detection; ComfyUI 0.33.1 is not the Moss compatibility target.
 
 Krea2 here means the local open-weight Krea2 Raw/Turbo model. It is not
 FLUX.1 Krea [dev], and it is not the hosted Krea API's Medium/Large model
@@ -55,6 +58,7 @@ required.
 Load Diffusion Model -> Anima INT8 ConvRot Save
 Load Diffusion Model -> Krea2 INT8 ConvRot Save
 Load Diffusion Model -> MiniMax H3 INT8 ConvRot Save
+Load Diffusion Model -> Moss Image INT8 ConvRot Save
 ```
 
 The checkpoint and optional JSON report are written together below ComfyUI's
@@ -67,6 +71,7 @@ API workflow examples:
 
 - [`examples/workflows/anima_int8_convrot.json`](examples/workflows/anima_int8_convrot.json)
 - [`examples/workflows/krea2_int8_convrot.json`](examples/workflows/krea2_int8_convrot.json)
+- [`examples/workflows/moss_image_int8_convrot.json`](examples/workflows/moss_image_int8_convrot.json)
 
 Each node returns the checkpoint path, optional report path, and a compact JSON
 summary containing counts, size, device, and optional hash.
@@ -104,6 +109,16 @@ MiniMax H3:
   main DiT block, for 200 INT8 matrices. See
   [`docs/minimax_h3.md`](docs/minimax_h3.md) for the exact contract and the
   current high-memory validation limitation.
+
+Moss Image:
+
+- `quality_keep` (default): supports the 42-layer, width-3072 architecture.
+  With fused QKV, the 168 selected weights, their shapes, FP32 row scales,
+  and ConvRot markers match the supplied official INT8 format reference.
+  Separate Q/K/V inputs retain their native layout and quantize 252 matrices.
+- Connect the original BF16/FP16/FP32 model directly to the save node.
+  The official `moss_image_base_int8_convrot.safetensors` is a format reference,
+  not an input for re-quantization. See [`docs/moss_image.md`](docs/moss_image.md).
 
 ## Safety checks
 

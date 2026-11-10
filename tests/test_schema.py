@@ -38,12 +38,13 @@ def test_v3_schema_and_registration():
     package = load_package()
     extension = asyncio.run(package.comfy_entrypoint())
     nodes = asyncio.run(extension.get_node_list())
-    assert len(nodes) == 3
+    assert len(nodes) == 4
     nodes_by_id = {node.define_schema().node_id: node for node in nodes}
     assert set(nodes_by_id) == {
         "ComfyQuantsAnimaInt8ConvRotSave",
         "ComfyQuantsKrea2Int8ConvRotSave",
         "ComfyQuantsMiniMaxH3Int8ConvRotSave",
+        "ComfyQuantsMossImageInt8ConvRotSave",
     }
     anima_node = nodes_by_id["ComfyQuantsAnimaInt8ConvRotSave"]
     krea2_node = nodes_by_id["ComfyQuantsKrea2Int8ConvRotSave"]
@@ -115,6 +116,15 @@ def test_v3_schema_and_registration():
     minimax_h3_info = minimax_h3_schema.get_v1_info(minimax_h3_node)
     assert minimax_h3_info.output_node is True
     assert "minimax h3" in minimax_h3_info.search_aliases
+
+    moss_node = nodes_by_id["ComfyQuantsMossImageInt8ConvRotSave"]
+    moss_schema = moss_node.define_schema()
+    moss_schema.validate()
+    assert moss_schema.display_name == "Moss Image INT8 ConvRot Save"
+    assert moss_schema.is_output_node is True
+    assert next(item for item in moss_schema.inputs if item.id == "quantization_preset").options == ["quality_keep"]
+    assert next(item for item in moss_schema.inputs if item.id == "filename_prefix").default == "moss_image_int8_convrot"
+    assert "moss image" in moss_schema.search_aliases
 
 
 def test_execute_reports_progress_and_returns_stable_summary(tmp_path, monkeypatch):
@@ -253,7 +263,12 @@ def test_anima_execute_uses_detected_depth_for_progress(tmp_path, monkeypatch, l
     assert json.loads(result.result[2])["quantized_tensor_count"] == count
 
 
-def test_krea2_execute_uses_krea2_contract_and_default_prefix(tmp_path, monkeypatch):
+@pytest.mark.parametrize("family,node_name,count", [
+    ("krea2", "Krea2", 224),
+    ("moss_image", "MossImage", 168),
+    ("moss_image", "MossImage", 252),
+])
+def test_native_family_execute_uses_contract_and_default_prefix(tmp_path, monkeypatch, family, node_name, count):
     if importlib.util.find_spec("folder_paths") is None:
         pytest.skip("ComfyUI checkout is required for the Backend V3 integration test")
     package = load_package()
@@ -261,13 +276,13 @@ def test_krea2_execute_uses_krea2_contract_and_default_prefix(tmp_path, monkeypa
     nodes = asyncio.run(extension.get_node_list())
     node_class = next(
         node for node in nodes
-        if node.define_schema().node_id == "ComfyQuantsKrea2Int8ConvRotSave"
+        if node.define_schema().node_id == f"ComfyQuants{node_name}Int8ConvRotSave"
     )
     node_module = sys.modules[node_class.__module__]
-    node_class.hidden = types.SimpleNamespace(unique_id="krea2-node")
+    node_class.hidden = types.SimpleNamespace(unique_id="family-node")
     output_directory = tmp_path / "output"
     output_root = output_directory / "diffusion_models"
-    output_paths = node_module.resolve_output_paths(output_root, "krea2_int8_convrot")
+    output_paths = node_module.resolve_output_paths(output_root, f"{family}_int8_convrot")
     captured = {}
 
     class FakeProgressBar:
@@ -284,17 +299,17 @@ def test_krea2_execute_uses_krea2_contract_and_default_prefix(tmp_path, monkeypa
         lambda: str(output_directory),
     )
     monkeypatch.setattr(node_module.folder_paths, "add_model_folder_path", lambda *_args: None)
-    monkeypatch.setattr(node_module, "extract_krea2_state_dict", lambda _model: {"x": object()})
+    monkeypatch.setattr(node_module, f"extract_{family}_state_dict", lambda _model: {"x": object()})
     monkeypatch.setattr(node_module, "estimate_state_dict_bytes", lambda _state: 123)
-    monkeypatch.setattr(node_module, "expected_krea2_quantized_tensors", lambda _preset: 224)
+    monkeypatch.setattr(node_module, f"expected_{family}_quantized_tensors", lambda *_args: count)
 
     def fake_export(**kwargs):
         captured["export"] = kwargs
         return (
             {
                 "status": "model_written",
-                "quantized_tensor_count": 224,
-                "rotated_tensor_count": 224,
+                "quantized_tensor_count": count,
+                "rotated_tensor_count": count,
                 "copied_tensor_count": 10,
                 "output_bytes": 456,
                 "execution_device": "cpu",
@@ -302,10 +317,10 @@ def test_krea2_execute_uses_krea2_contract_and_default_prefix(tmp_path, monkeypa
             "",
         )
 
-    monkeypatch.setattr(node_module, "export_krea2_int8_convrot", fake_export)
+    monkeypatch.setattr(node_module, f"export_{family}_int8_convrot", fake_export)
     result = node_class.execute(
         model=object(),
-        filename_prefix="krea2_int8_convrot",
+        filename_prefix=f"{family}_int8_convrot",
         device="cpu",
         overwrite=False,
         write_report=False,
@@ -315,9 +330,9 @@ def test_krea2_execute_uses_krea2_contract_and_default_prefix(tmp_path, monkeypa
     checkpoint, report, summary_text = result.result
     assert checkpoint == str(output_paths.checkpoint)
     assert report == ""
-    assert json.loads(summary_text)["quantized_tensor_count"] == 224
-    assert captured["progress"] == (224, "krea2-node")
-    assert captured["last_progress"] == (224, 224)
+    assert json.loads(summary_text)["quantized_tensor_count"] == count
+    assert captured["progress"] == (count, "family-node")
+    assert captured["last_progress"] == (count, count)
     assert captured["export"]["quantization_preset"] == "quality_keep"
 
 

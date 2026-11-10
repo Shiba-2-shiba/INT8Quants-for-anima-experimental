@@ -12,6 +12,8 @@
   boundary, complete 532-source/332-copied tensor contract, and stock ComfyUI
   model detection
 - Hadamard orthogonality and ConvRot math
+- Moss Image official reference manifest, 168 fused / 252 separate QKV
+  selections, complete source validation, and optional stock model detection
 - FP16/BF16 rowwise INT8, FP32 scales, exact marker bytes
 - Input mapping/tensor non-mutation
 - Missing/rank/shape/dtype/non-finite rejection
@@ -53,6 +55,10 @@ Before publishing each release:
     obligations before publishing quantized Krea2 weights.
 
 Do not commit source models, generated checkpoints, or private local paths.
+
+For Moss Image, full-model export/reload/inference are pending user-run
+validation. See [moss_image.md](moss_image.md) for expected counts and the
+reference's optional attention/RoPE metadata differences.
 
 ## Anima 2.9B validation scope
 
